@@ -17,16 +17,14 @@ from langchain_core.tools import tool
 
 from app.api.context import get_session_context
 from app.api.monitor import monitor
-from app.utils.path_utils import resolve_path
+from app.utils.path_utils import resolve_write_path
 from app.utils.word_converter import convert_md_to_pdf as convert_md_to_pdf_via_word
 
 
 @tool
 def convert_md_to_pdf(
     md_filename: Annotated[str, "要转换的Markdown文档路径（包含.md后缀）"],
-    pdf_filename: Annotated[
-        Optional[str], "输出的PDF文件路径（可选，默认与源文件同名）"
-    ] = None,
+    pdf_filename: Annotated[Optional[str], "输出的PDF文件路径（可选，默认与源文件同名）"] = None,
 ) -> str:
     """
     将当前会话目录中的 Markdown 文档转换为 PDF
@@ -39,9 +37,10 @@ def convert_md_to_pdf(
 
     try:
         # 输入路径必须先落到当前会话目录，避免模型传入任意系统路径
+        # （resolve_write_path 会把越界路径收敛回会话目录内的同名文件）
         session_dir = get_session_context()
         md_path = Path(md_filename).with_suffix(".md")
-        md_abs_path = Path(resolve_path(str(md_path), session_dir))
+        md_abs_path = Path(resolve_write_path(str(md_path), session_dir))
 
         if not md_abs_path.exists():
             return f"错误：文件不存在 {md_abs_path}"
@@ -49,7 +48,7 @@ def convert_md_to_pdf(
         # 未指定 PDF 文件名时，默认与源 Markdown 同目录同名
         if pdf_filename:
             pdf_path = Path(pdf_filename).with_suffix(".pdf")
-            pdf_abs_path = Path(resolve_path(str(pdf_path), session_dir))
+            pdf_abs_path = Path(resolve_write_path(str(pdf_path), session_dir))
         else:
             pdf_abs_path = md_abs_path.with_suffix(".pdf")
 
@@ -63,7 +62,8 @@ def convert_md_to_pdf(
 
 if __name__ == "__main__":
     # 本地调试入口：直接运行本文件可验证 Markdown 转 PDF 链路
-    get_session_context = lambda: "./examples/test_docs"
+    def get_session_context():
+        return "./examples/test_docs"
 
     test_dir = Path("./examples/test_docs/sub_dir")
     test_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +92,8 @@ if __name__ == "__main__":
 
 ## 四、行动建议
 
-围绕“增长、转化、风控、合规”四个关键词设计分析框架，并将公开信息、数据库数据和 RAGFlow 知识库材料统一整理成可交付报告。
+围绕“增长、转化、风控、合规”四个关键词设计分析框架，
+并将公开信息、数据库数据和本地知识库材料统一整理成可交付报告。
 """,
         encoding="utf-8",
     )

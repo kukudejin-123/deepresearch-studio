@@ -312,9 +312,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         while True:
             # 前端通常发送 ping 心跳；服务端回复 pong，顺便维持连接活跃
             data = await websocket.receive_text()
-            await websocket.send_json(
-                {"type": "pong", "message": f"服务端已收到: {data}"}
-            )
+            await websocket.send_json({"type": "pong", "message": f"服务端已收到: {data}"})
 
     except WebSocketDisconnect:
         # 只移除当前 WebSocket 实例，避免旧连接断开时误删同 thread_id 的新连接

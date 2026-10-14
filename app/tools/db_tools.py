@@ -178,9 +178,7 @@ def execute_sql_query(query) -> str:
                 1,张三,18\n
     """
     # 埋点：记录模型最终生成的 SQL，便于教学时观察是否真的落到了正确表字段上
-    monitor.report_tool(
-        tool_name="数据库表数据查询工具：execute_sql_query", args={"query": query}
-    )
+    monitor.report_tool(tool_name="数据库表数据查询工具：execute_sql_query", args={"query": query})
 
     # 获取数据库参数
     config = get_db_config()
@@ -216,10 +214,5 @@ def execute_sql_query(query) -> str:
 
 if __name__ == "__main__":
     # 本地调试入口：直接运行本文件可验证 .env 中的 MySQL 连接配置是否可用
-    print(
-        execute_sql_query.invoke(
-            {
-                "query": "SELECT * FROM `drugs` dgs join sales_records srd on dgs.drug_id = srd.drug_id"
-            }
-        )
-    )
+    query = "SELECT * FROM `drugs` dgs join sales_records srd on dgs.drug_id = srd.drug_id"
+    print(execute_sql_query.invoke({"query": query}))

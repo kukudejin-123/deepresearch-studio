@@ -15,7 +15,7 @@ from langchain_core.tools import tool
 
 from app.api.context import get_session_context
 from app.api.monitor import monitor
-from app.utils.path_utils import resolve_path
+from app.utils.path_utils import resolve_write_path
 
 
 @tool
@@ -46,7 +46,9 @@ def generate_markdown(
         full_input_path = str(Path(path) / filename)
     else:
         full_input_path = filename
-    full_path_str = resolve_path(full_input_path, session_dir)
+    # 写入路径统一走 resolve_write_path：模型传入 '../' 或目录外绝对路径时，
+    # 会被收敛回当前会话目录，避免产物写到工作区之外
+    full_path_str = resolve_write_path(full_input_path, session_dir)
     file_path = Path(full_path_str)
 
     parent_dir = file_path.parent

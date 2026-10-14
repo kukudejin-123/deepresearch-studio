@@ -83,3 +83,30 @@ def _fix_nested_session_path(
         if parts[index] == session_name and parts[index + 1] == session_name:
             return str(session_path / full_path.name)
     return str(full_path)
+
+
+def resolve_write_path(filename: str, session_dir: Optional[str] = None) -> str:
+    """
+    解析写入路径，并强制约束在当前会话目录内
+
+    resolve_path 为了兼容“读取外部资源”的场景，会原样保留会话目录外的真实
+    绝对路径；但文件写入工具（Markdown/PDF）绝不允许模型通过 '../' 或绝对
+    路径把产物写到会话目录之外。本函数在 resolve_path 之上增加 containment
+    检查：越界路径统一收敛为会话目录内的同名文件。
+
+    :param filename: 模型、工具或用户传入的文件名/路径
+    :param session_dir: 当前任务的会话目录
+    :return: 保证位于会话目录内的绝对路径
+    """
+    resolved = Path(resolve_path(filename, session_dir))
+
+    if not session_dir:
+        return str(resolved)
+
+    session_path = Path(session_dir).resolve()
+    try:
+        resolved.resolve().relative_to(session_path)
+    except ValueError:
+        # 越界时收敛为会话目录内的同名文件，保证写入边界
+        return str(session_path / resolved.name)
+    return str(resolved)

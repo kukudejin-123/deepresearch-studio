@@ -111,9 +111,7 @@ class TaskStore:
         :return: 任务字典；不存在时返回 None
         """
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM tasks WHERE thread_id = ?", (thread_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM tasks WHERE thread_id = ?", (thread_id,)).fetchone()
         return dict(row) if row else None
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -121,10 +119,11 @@ class TaskStore:
         查询最近的任务列表
 
         :param limit: 返回条数上限
-        :return: 任务字典列表，按更新时间倒序
+        :return: 任务字典列表，按更新时间倒序（同一秒内的按提交顺序倒序）
         """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM tasks ORDER BY updated_at DESC, rowid DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         return [dict(row) for row in rows]

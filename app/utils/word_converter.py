@@ -269,8 +269,7 @@ def _build_table(rows: list[list[str]], styles: dict[str, ParagraphStyle]):
     column_count = max(len(row) for row in rows)
     normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
     data = [
-        [Paragraph(_format_inline(cell), styles["body"]) for cell in row]
-        for row in normalized_rows
+        [Paragraph(_format_inline(cell), styles["body"]) for cell in row] for row in normalized_rows
     ]
     table = Table(data, repeatRows=1)
     table.setStyle(

@@ -18,18 +18,61 @@
         └── ...
 """
 
+import hashlib
 import json
+import pickle
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import faiss
+import numpy as np
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 
 from app.rag.embeddings import get_embeddings
 from app.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+INDEX_FILE_NAME = "index.faiss"
+DOCSTORE_FILE_NAME = "index.pkl"
+
+
+def _save_faiss_index(store: FAISS, collection_dir: Path) -> None:
+    """
+    将 FAISS 索引与文档存储写入集合目录
+
+    为什么不直接用 FAISS.save_local：其内部调用 faiss.write_index，
+    走 C++ 窄字符文件 IO，Windows 上路径含任何非 ASCII 字符
+    （例如中文项目目录、中文 Windows 用户名）都会写盘失败。
+    这里改用 faiss.serialize_index 得到字节数组后用 Python 写文件，
+    路径安全性由 Python 层保证，跨平台行为一致。
+    """
+    index_bytes = faiss.serialize_index(store.index)
+    (collection_dir / INDEX_FILE_NAME).write_bytes(index_bytes.tobytes())
+
+    with open(collection_dir / DOCSTORE_FILE_NAME, "wb") as f:
+        pickle.dump((store.docstore, store.index_to_docstore_id), f)
+
+
+def _load_faiss_index(collection_dir: Path, embeddings: Embeddings) -> FAISS:
+    """
+    从集合目录还原 FAISS 对象
+
+    :param collection_dir: 集合目录
+    :param embeddings: 检索时使用的 Embedding 客户端
+    :return: 可检索的 FAISS 对象
+    """
+    raw = (collection_dir / INDEX_FILE_NAME).read_bytes()
+    index = faiss.deserialize_index(np.frombuffer(raw, dtype=np.uint8))
+
+    with open(collection_dir / DOCSTORE_FILE_NAME, "rb") as f:
+        docstore, index_to_docstore_id = pickle.load(f)
+
+    return FAISS(embeddings, index, docstore, index_to_docstore_id)
 
 
 @dataclass
@@ -70,10 +113,23 @@ class VectorKnowledgeBase:
         """
         self.root = Path(root)
 
+    def _slugify(self, name: str) -> str:
+        """
+        集合名称转 ASCII 安全的目录名
+
+        FAISS 的 C++ 写入层（faiss.write_index）在 Windows 上无法打开包含
+        非 ASCII 字符的路径，直接以中文名建目录会写盘失败。因此磁盘目录统一
+        使用“ASCII 片段 + 名称哈希”，中文展示名保留在 meta.json 的 name 字段，
+        对上层工具和调用方完全透明。
+        """
+        ascii_part = re.sub(r"[^A-Za-z0-9_-]+", "", name)[:20]
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+        prefix = ascii_part or "collection"
+        return f"{prefix}_{digest}"
+
     def _collection_dir(self, name: str) -> Path:
-        """集合目录；对名称做基础清洗，避免路径穿越"""
-        safe_name = Path(name).name
-        return self.root / safe_name
+        """集合目录；名称经 slug 化处理，天然免疫路径穿越"""
+        return self.root / self._slugify(name)
 
     def list_collections(self) -> list[CollectionInfo]:
         """
@@ -127,23 +183,14 @@ class VectorKnowledgeBase:
         :param name: 集合名称
         :return: 可检索的 FAISS 对象
         :raises FileNotFoundError: 集合不存在或索引文件缺失
-        :raises RuntimeError: 未配置 Embedding 服务（加载时仅校验存在性，不发起请求）
         """
         collection_dir = self._collection_dir(name)
-        index_file = collection_dir / "index.faiss"
+        index_file = collection_dir / INDEX_FILE_NAME
         if not index_file.exists():
-            raise FileNotFoundError(
-                f"知识库集合 '{name}' 不存在（可用集合: {[c.name for c in self.list_collections()]}）"
-            )
+            available = [c.name for c in self.list_collections()]
+            raise FileNotFoundError(f"知识库集合 '{name}' 不存在（可用集合: {available}）")
 
-        # allow_dangerous_deserialization 是加载本地 docstore 的官方要求；
-        # 这里的 pkl 由本项目 ingest 流程生成，不属于不可信输入
-        return FAISS.load_local(
-            folder_path=str(collection_dir),
-            embeddings=get_embeddings(),
-            index_name="index",
-            allow_dangerous_deserialization=True,
-        )
+        return _load_faiss_index(collection_dir, get_embeddings())
 
     def search(
         self,
@@ -160,8 +207,10 @@ class VectorKnowledgeBase:
         :return: (文档分片, 相似度分数) 列表，按相关度降序
         """
         store = self.load_store(name)
-        # FAISS 返回的是 L2 距离，越小越相关
-        return store.similarity_search_with_score(question, k=top_k)
+        # FAISS 返回的是 L2 距离（numpy.float32），越小越相关；
+        # 统一转成 Python float，避免调用方处理 numpy 类型
+        scored = store.similarity_search_with_score(question, k=top_k)
+        return [(doc, float(score)) for doc, score in scored]
 
     def save_collection(
         self,
@@ -185,7 +234,7 @@ class VectorKnowledgeBase:
 
         collection_dir = self._collection_dir(name)
         collection_dir.mkdir(parents=True, exist_ok=True)
-        store.save_local(folder_path=str(collection_dir), index_name="index")
+        _save_faiss_index(store, collection_dir)
 
         info = CollectionInfo(
             name=name,

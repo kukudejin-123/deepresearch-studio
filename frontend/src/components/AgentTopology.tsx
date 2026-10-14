@@ -13,8 +13,8 @@ const agents = [
   },
   {
     icon: <FileSearchOutlined aria-hidden />,
-    name: "RAGFlow 助手",
-    detail: "内部 PDF、白皮书、研报与私有知识库问答"
+    name: "知识库助手",
+    detail: "本地向量知识库检索，内部 PDF、白皮书与研报问答"
   }
 ];
 

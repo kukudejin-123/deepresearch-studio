@@ -48,11 +48,11 @@ def list_knowledge_collections() -> str:
         return f"查询知识库集合失败: {e}"
 
     if not collections:
-        return "当前没有任何可用的知识库集合。如需使用私有知识库，请先运行 app.rag.ingest 构建向量库。"
+        return (
+            "当前没有任何可用的知识库集合。如需使用私有知识库，请先运行 app.rag.ingest 构建向量库。"
+        )
 
-    return "可用的知识库集合如下：\n" + "\n".join(
-        info.to_prompt_text() for info in collections
-    )
+    return "可用的知识库集合如下：\n" + "\n".join(info.to_prompt_text() for info in collections)
 
 
 @tool
@@ -90,9 +90,7 @@ def search_knowledge_base(
     sections = []
     for index, (doc, score) in enumerate(results, start=1):
         source = doc.metadata.get("source", "未知来源")
-        sections.append(
-            f"[片段{index} | 来源: {source} | 相关度: {score:.4f}]\n{doc.page_content}"
-        )
+        sections.append(f"[片段{index} | 来源: {source} | 相关度: {score:.4f}]\n{doc.page_content}")
     return "\n\n".join(sections)
 
 

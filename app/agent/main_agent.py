@@ -8,6 +8,7 @@ session_id 创建独立工作目录，把任务状态写入 SQLite 任务存储�
 """
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 
@@ -31,12 +32,12 @@ from app.api.task_store import (
     STATUS_FAILED,
     TaskStore,
 )
-from app.utils.logging_config import get_logger, setup_logging
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
 from app.tools.pdf_tools import convert_md_to_pdf
 from app.tools.upload_file_read_tool import read_file_content
+from app.utils.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
@@ -55,8 +56,11 @@ main_agent = create_deep_agent(
 # 当前文件位于 app/agent/main_agent.py，parents[1] 即 app 目录
 project_root_path = Path(__file__).parents[1].resolve()
 
-# 任务生命周期存储：与检查点数据库同目录，服务重启后历史任务仍可查询
-task_store = TaskStore(project_root_path / "data" / "checkpoints.db")
+# 任务生命周期存储：默认与检查点数据库同目录（app/data/checkpoints.db），
+# 可用 CHECKPOINTER_DB 环境变量覆盖，便于测试隔离
+task_store = TaskStore(
+    os.getenv("CHECKPOINTER_DB") or (project_root_path / "data" / "checkpoints.db")
+)
 
 
 async def run_deep_agent(task_query, session_id):
@@ -76,9 +80,7 @@ async def run_deep_agent(task_query, session_id):
 
     # 前端和工具使用绝对路径；提示词里只给模型相对路径，降低模型误用系统绝对路径的概率
     session_dir_str = str(session_dir).replace("\\", "/")
-    relative_session_dir_str = str(session_dir.relative_to(project_root_path)).replace(
-        "\\", "/"
-    )
+    relative_session_dir_str = str(session_dir.relative_to(project_root_path)).replace("\\", "/")
 
     # 上传文件先落在 updated/session_{session_id}，执行前复制到本次 output 工作目录
     # 这样读文件工具和生成文件工具都只需要围绕同一个 session_dir 工作
@@ -116,7 +118,7 @@ async def run_deep_agent(task_query, session_id):
 
     规则：
     1. 新生成文件必须保存到工作目录：'{relative_session_dir_str}/filename'
-    2. 读取已上传的文件时，请直接将文件名（例如：'开篇.txt'）作为 filename 参数传入（read_file_content）读取工具，不要带上任何目录前缀。
+    2. 读取已上传文件时，请直接将文件名作为 read_file_content 的 filename 参数传入，不要带目录前缀。
     3. 使用相对路径，禁止使用绝对路径
     4. 若存在上传文件，请先分析内容
     """
@@ -142,11 +144,7 @@ async def run_deep_agent(task_query, session_id):
                                     # 子智能体调用单独上报，前端可以展示“正在调用哪个专家助手”
                                     monitor.report_assistant(
                                         tool_call["args"]["subagent_type"],
-                                        {
-                                            "description": tool_call["args"][
-                                                "description"
-                                            ]
-                                        },
+                                        {"description": tool_call["args"]["description"]},
                                     )
                         elif last_msg.content:
                             # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
@@ -179,6 +177,4 @@ if __name__ == "__main__":
     import asyncio
 
     setup_logging("INFO")
-    asyncio.run(
-        run_deep_agent("从网络查询机器人信息，并生成Markdown文件", "test_session_001")
-    )
+    asyncio.run(run_deep_agent("从网络查询机器人信息，并生成Markdown文件", "test_session_001"))
