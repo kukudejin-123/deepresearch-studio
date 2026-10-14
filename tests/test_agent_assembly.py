@@ -12,13 +12,14 @@ from app.agent.subagents.knowledge_base_agent import knowledge_base_agent
 class TestMainAgentAssembly:
     """主智能体组装验证"""
 
-    def test_main_agent_is_created(self):
-        """create_deep_agent 返回可用的编译图对象"""
-        agent = main_agent_module.main_agent
+    async def test_main_agent_is_created(self):
+        """get_main_agent 返回可用的编译图对象，且重复调用返回同一实例"""
+        agent = await main_agent_module.get_main_agent()
 
         assert agent is not None
-        # 编译后的 LangGraph 图提供 invoke/astream 接口
+        # 编译后的 LangGraph 图提供 astream 接口
         assert hasattr(agent, "astream")
+        assert await main_agent_module.get_main_agent() is agent
 
     def test_three_subagents_registered(self):
         """三个专家子智能体全部注册"""
@@ -28,7 +29,11 @@ class TestMainAgentAssembly:
         agents = [database_query_agent, network_search_agent, knowledge_base_agent]
 
         assert len(agents) == 3
-        assert {a["name"] for a in agents} == {"网络搜索助手", "数据库查询助手", "知识库助手"}
+        assert {a["name"] for a in agents} == {
+            "网络搜索助手",
+            "数据库查询助手",
+            "知识库助手",
+        }
 
     def test_knowledge_base_agent_uses_local_vector_tools(self):
         """知识库助手使用本地向量检索工具"""
@@ -44,9 +49,8 @@ class TestMainAgentAssembly:
         assert knowledge_base_agent["description"].strip()
         assert knowledge_base_agent["system_prompt"].strip()
 
-    def test_task_store_uses_env_override(self, tmp_path, monkeypatch):
-        """任务存储路径支持 CHECKPOINTER_DB 环境变量覆盖"""
-        # 模块导入时已按测试环境创建；这里验证默认路径拼接逻辑
+    def test_task_store_is_initialized(self):
+        """任务存储在模块导入时即就绪"""
         assert main_agent_module.task_store is not None
 
     def test_run_deep_agent_is_coroutine_function(self):

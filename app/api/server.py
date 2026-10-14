@@ -49,10 +49,10 @@ async def lifespan(_app: FastAPI):
     loop = asyncio.get_running_loop()
     manager.set_loop(loop)
     # 预热检查点：启动即建表，避免首个任务请求时才感知数据库问题
-    get_checkpointer()
+    await get_checkpointer()
     logger.info("DeepSearch Agents 服务启动完成")
     yield
-    close_checkpointer()
+    await close_checkpointer()
     logger.info("DeepSearch Agents 服务已停机")
 
 

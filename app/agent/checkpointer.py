@@ -4,21 +4,26 @@
 原版使用 InMemorySaver，会话执行状态只保存在内存中，服务重启后
 历史会话全部丢失。本模块提供两种可切换的检查点实现：
 
-- sqlite（默认）：SqliteSaver 持久化到 app/data/checkpoints.db，
+- sqlite（默认）：AsyncSqliteSaver 持久化到 app/data/checkpoints.db，
   服务重启后可以按 thread_id 恢复历史会话上下文；
 - memory：InMemorySaver，仅供本地调试或无持久化要求的场景使用。
 
 通过 .env 中的 CHECKPOINTER_TYPE 切换。
+
+注意：主智能体通过 astream 异步执行，LangGraph 会调用检查点的异步接口
+（aput/aget），因此持久化模式必须使用 AsyncSqliteSaver（aiosqlite 驱动），
+同步的 SqliteSaver 在异步图里会直接报错。
 """
 
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
+import aiosqlite
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.utils.logging_config import get_logger
 
@@ -34,11 +39,11 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "app" / "data" / "checkpoints.db"
 _checkpointer: Optional[BaseCheckpointSaver] = None
 
 
-def get_checkpointer() -> BaseCheckpointSaver:
+async def get_checkpointer() -> BaseCheckpointSaver:
     """
-    获取全局复用的检查点实例
+    获取全局复用的检查点实例（异步创建）
 
-    :return: SqliteSaver 或 InMemorySaver
+    :return: AsyncSqliteSaver 或 InMemorySaver
     """
     global _checkpointer
     if _checkpointer is not None:
@@ -53,18 +58,16 @@ def get_checkpointer() -> BaseCheckpointSaver:
     db_path = Path(os.getenv("CHECKPOINTER_DB", str(DEFAULT_DB_PATH)))
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # check_same_thread=False 允许 FastAPI 线程池与事件循环共用连接；
-    # SqliteSaver 内部已有 threading.Lock 串行化写操作
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    saver = SqliteSaver(conn)
-    saver.setup()
+    conn = await aiosqlite.connect(str(db_path))
+    saver = AsyncSqliteSaver(conn)
+    await saver.setup()
 
     _checkpointer = saver
     logger.info("检查点类型: sqlite（数据库文件: %s）", db_path)
     return _checkpointer
 
 
-def close_checkpointer() -> None:
+async def close_checkpointer() -> None:
     """
     关闭检查点连接，服务停机时调用
 
@@ -74,10 +77,10 @@ def close_checkpointer() -> None:
     if _checkpointer is None:
         return
 
-    conn: Union[sqlite3.Connection, None] = getattr(_checkpointer, "conn", None)
+    conn = getattr(_checkpointer, "conn", None)
     if conn is not None:
         try:
-            conn.close()
+            await conn.close()
             logger.info("SQLite 检查点连接已关闭")
         except sqlite3.Error as e:
             logger.warning("关闭 SQLite 检查点连接失败: %s", e)

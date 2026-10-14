@@ -45,13 +45,40 @@ logger = get_logger(__name__)
 # 1. tools 只放最终交付相关的文件工具
 # 2. subagents 放网络、数据库、知识库三类信息获取助手
 # 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文（默认 SQLite 持久化）
-main_agent = create_deep_agent(
-    model=model,
-    system_prompt=main_agent_content["system_prompt"],
-    tools=[generate_markdown, convert_md_to_pdf, read_file_content],
-    checkpointer=get_checkpointer(),
-    subagents=[database_query_agent, network_search_agent, knowledge_base_agent],
-)
+#
+# 采用惰性异步组装：AsyncSqliteSaver 需要在事件循环内创建，
+# 模块导入时没有可用的 loop，因此推迟到首次执行任务时构建。
+_main_agent = None
+_agent_build_lock = asyncio.Lock()
+
+
+async def get_main_agent():
+    """
+    获取全局复用的主智能体（首次调用时组装）
+
+    :return: 组装完成的 DeepAgent 编译图
+    """
+    global _main_agent
+    if _main_agent is not None:
+        return _main_agent
+
+    # 并发首个任务可能同时触发组装，用锁保证只构建一次
+    async with _agent_build_lock:
+        if _main_agent is None:
+            _main_agent = create_deep_agent(
+                model=model,
+                system_prompt=main_agent_content["system_prompt"],
+                tools=[generate_markdown, convert_md_to_pdf, read_file_content],
+                checkpointer=await get_checkpointer(),
+                subagents=[
+                    database_query_agent,
+                    network_search_agent,
+                    knowledge_base_agent,
+                ],
+            )
+            logger.info("主智能体组装完成")
+    return _main_agent
+
 
 # 当前文件位于 app/agent/main_agent.py，parents[1] 即 app 目录
 project_root_path = Path(__file__).parents[1].resolve()
@@ -124,8 +151,9 @@ async def run_deep_agent(task_query, session_id):
     """
 
     try:
+        agent = await get_main_agent()
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
-        async for chunk in main_agent.astream(
+        async for chunk in agent.astream(
             {"messages": [{"role": "user", "content": task_query + path_instruction}]},
             config=config,
         ):

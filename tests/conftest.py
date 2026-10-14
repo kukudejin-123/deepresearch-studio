@@ -56,13 +56,21 @@ def session_dir(tmp_path):
 @pytest.fixture
 def reset_checkpointer():
     """
-    重置 checkpointer 模块单例，保证每个测试按当前环境变量重新创建
+    重置 checkpointer 模块单例，保证每个测试按当前环境变量重新创建；
+    结束后关闭连接（异步测试内直接 await，同步上下文用 asyncio.run 收尾）。
     """
+    import asyncio
+
     from app.agent import checkpointer as checkpointer_module
 
     checkpointer_module._checkpointer = None
     yield checkpointer_module
-    checkpointer_module.close_checkpointer()
+
+    if checkpointer_module._checkpointer is not None:
+        try:
+            asyncio.run(checkpointer_module.close_checkpointer())
+        except RuntimeError:
+            pass
 
 
 @pytest.fixture(autouse=True)
