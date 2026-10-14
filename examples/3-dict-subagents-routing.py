@@ -115,9 +115,7 @@ def test_stream(query):
                     # tools 节点返回普通工具结果；task 子智能体执行完后也会以工具消息形式返回
                     name = last_msg.name
                     content = last_msg.content
-                    print(
-                        f"【agent】调用了具体的工具{name},返回结果为：{content[:100] + '...'}"
-                    )
+                    print(f"【agent】调用了具体的工具{name},返回结果为：{content[:100] + '...'}")
 
 
 test_stream("北京今天的天气怎么样？")

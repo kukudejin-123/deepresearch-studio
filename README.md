@@ -1,6 +1,6 @@
 <div align='center'>
-  <h1 style="margin-top: 15px;">「深度研搜」对话式多智能体研究系统</h1>
-  <h4><b>deepsearch-agents（工程化改造版）</b></h4>
+  <h1 style="margin-top: 15px;">「深研」DeepResearch Studio</h1>
+  <h4><b>deepresearch-studio · 对话式多智能体深度研究平台</b></h4>
   <p><em>基于 DeepAgents + LangGraph 的深度研究多智能体系统：本地 FAISS 向量知识库、SQLite 会话持久化、任务生命周期管理、pytest + CI 全链路测试</em></p>
 </div>
 
@@ -14,17 +14,17 @@
 ![Tests](https://img.shields.io/badge/pytest-67%20passed-success.svg)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=githubactions&logoColor=white)
 
-[快速开始](#quick-start) • [项目亮点](#features) • [系统架构](#architecture) • [改造说明](#changelog) • [加入社群](#community)
+[快速开始](#quick-start) • [项目亮点](#features) • [系统架构](#architecture) • [改造说明](#changelog)
 
 </div>
 
-> **📢 版本说明**：本仓库是基于开源教学项目 [didilili/deepsearch-agents](https://github.com/didilili/deepsearch-agents)（「深度研搜」，[ai-agents-from-zero](https://github.com/didilili/ai-agents-from-zero) 教程体系实战项目）的**工程化改造版**。原项目提供了完整的多智能体学习骨架，本版本在其基础上补齐了生产环境必需的能力：**用本地 FAISS 向量库替换外部 RAGFlow 服务、SQLite 持久化会话检查点、任务生命周期管理、完整测试与 CI、结构化日志**。详细改造点见 [改造说明](#changelog)，原项目的版权归原作者所有。
+> **📌 项目来源**：本项目基于开源教学项目 [didilili/deepsearch-agents](https://github.com/didilili/deepsearch-agents)（DeepAgents 教程体系 [ai-agents-from-zero](https://github.com/didilili/ai-agents-from-zero) 的实战项目，版权归原作者 didilili 所有）二次开发，在原版多智能体骨架基础上完成了本地 RAG、会话持久化、任务管理、测试与 CI 等工程化改造，逐项记录见文末[改造说明](#changelog)。
 
 如果你正在找一个适合学习 `DeepAgents`、`LangGraph`、`WebSocket`、`Tavily`、本地 RAG 和 AI Agent 工程开发的实战项目，这个仓库可能是最适合你的项目。
 
 它不是只调用一次大模型接口，也不是套一个搜索 API 做问答演示。这个项目围绕深度研究场景，用 DeepAgents 组织主智能体和专家子智能体，让系统可以根据任务需要查公开网络、查结构化数据库、查本地向量知识库、读取用户上传附件，并把最终结果整理成回答、Markdown 或 PDF。换句话说，你学到的不是某一个框架 API，而是一条 AI 应用从多智能体规划、工具接入、上下文隔离、持久化、接口交付到前端联调的完整项目主线。
 
-![深度研搜前端首页：任务示例、助手状态和对话式多智能体研究台](docs/images/deepsearch-agent-home.jpg)
+![深研前端首页：任务示例、助手状态和对话式多智能体研究台](docs/images/deepresearch-studio-home.jpg)
 
 ## 📖 项目介绍
 
@@ -47,7 +47,7 @@
 - 生成 Markdown 报告，并在需要时转换成 PDF；
 - 把执行过程、最终结果和生成文件实时展示给前端。
 
-所以「深度研搜」更像一个会分工、会查资料、会生成交付物的研究助手。用户只需要提出任务，系统会在后端组织一条可观察的多智能体执行链路。
+所以「深研」更像一个会分工、会查资料、会生成交付物的研究助手。用户只需要提出任务，系统会在后端组织一条可观察的多智能体执行链路。
 
 ```text
 用户任务
@@ -104,7 +104,7 @@
 
 ## 🏗️ 系统架构
 
-![深度研搜系统架构图：前端、FastAPI、DeepAgents、子智能体、工具和文件产物之间的关系](docs/images/deepsearch-system-architecture.svg)
+![深研系统架构图：前端、FastAPI、DeepAgents、子智能体、工具和文件产物之间的关系](docs/images/deepresearch-system-architecture.svg)
 
 项目采用 DeepAgents 中典型的 Orchestrator-Workers 模式：主智能体作为调度中心，三个专家助手负责信息获取，文件工具由主智能体直接掌握。
 
@@ -112,7 +112,7 @@
 
 | 主线             | 做什么                                                       | 涉及模块                                                                  |
 | ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| 多智能体深度研搜 | 基于用户任务完成规划、分派、检索、读取附件、汇总和生成交付物 | `DeepAgents` / `LangChain` / `LangGraph` / `Tavily` / `MySQL` / `FAISS` |
+| 多智能体深度研究 | 基于用户任务完成规划、分派、检索、读取附件、汇总和生成交付物 | `DeepAgents` / `LangChain` / `LangGraph` / `Tavily` / `MySQL` / `FAISS` |
 | 前后端实时闭环   | 启动后台任务、上传文件、推送执行过程、展示结果和下载生成文件 | `FastAPI` / `WebSocket` / `React` / `Vite`                                |
 
 ### 智能体与工具
@@ -124,7 +124,7 @@
 | 数据库查询助手 | 发现表名、预览表结构和样例数据、执行 SQL | `list_sql_tables`、`get_table_data`、`execute_sql_query`      |
 | 知识库助手     | 发现本地向量知识库集合，并在集合内语义检索 | `list_knowledge_collections`、`search_knowledge_base`         |
 
-![深度研搜网络搜索任务执行页：WebSocket 事件流、工具调用和最终回答](docs/images/deepsearch-network-search-result.jpg)
+![深研网络搜索任务执行页：WebSocket 事件流、工具调用和最终回答](docs/images/deepresearch-network-search-result.jpg)
 
 ## 🛠️ 项目技术栈
 
@@ -148,7 +148,7 @@
 ## 📁 项目结构
 
 ```text
-deepsearch-agents/
+deepresearch-studio/
 ├── app/
 │   ├── agent/
 │   │   ├── subagents/              # 网络搜索、数据库查询、知识库三个子智能体
@@ -206,7 +206,7 @@ deepsearch-agents/
 ```bash
 # 克隆你自己的 fork（或本改造版仓库）
 git clone <你的仓库地址>
-cd deepsearch-agents
+cd deepresearch-studio
 ```
 
 ### 3. 安装后端依赖
@@ -245,7 +245,7 @@ CHECKPOINTER_DB=app/data/checkpoints.db
 # MySQL 配置
 MYSQL_USER=root
 MYSQL_PASSWORD=root
-MYSQL_DATABASE=deepsearch_db
+MYSQL_DATABASE=deepresearch_db
 MYSQL_HOST=localhost
 MYSQL_PORT=3307
 MYSQL_CHARSET=utf8mb4
@@ -384,17 +384,7 @@ uv run ruff format --check app tests  # 格式检查
 - 全项目 `print` 日志统一为 `logging` 结构化日志（`app/utils/logging_config.py`），服务启动时统一初始化；
 - 修复文件工具的**路径穿越漏洞**：新增 `resolve_write_path`，模型传入 `../` 或目录外绝对路径时，产物强制收敛回当前会话目录；
 - 任务列表同一秒内提交时排序不稳定，增加 `rowid` 次级排序；
-- 修正 `prompts.py` 模块级遗留的调试 `print`；前端 RAGFlow 文案同步更新为"知识库助手"。
-
-<a id="community"></a>
-
-## 💬 加入社群
-
-想和更多朋友聊聊 **AI 编程、Vibe Coding、面试经验，顺便 吹水唠嗑、吐槽老板**？欢迎加入「**全宇宙最有爱的 AI Agent 交流群 —— 胡思妙想研究所**」！🎉
-
-👉 [猛击这里！申请入所](https://github.com/didilili/ai-agents-from-zero/issues/46)：在申请帖留言，并按帖内说明添加微信。
-
-愿我们在这里少一点焦虑，多一点灵感；少一点单打独斗，多一点一起胡思妙想～
+- 修正 `prompts.py` 模块级遗留的调试 `print`；前端知识库文案同步更新。
 
 ## 📚 配套教程目录
 

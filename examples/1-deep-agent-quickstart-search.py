@@ -40,12 +40,11 @@ def internet_search(
     :param query: 搜索关键词
     :param max_results: 返回结果数量
     :param topic: 查询主题，可选 news、finance、general
-    :param include_raw_content: 是否返回更详细的原文内容，include_raw_content=False 时返回摘要内容；True 时会尝试返回更完整的网页原文
+    :param include_raw_content: 是否返回更详细的原文内容；
+        False 时返回摘要内容，True 时会尝试返回更完整的网页原文
     :return: Tavily 搜索结果
     """
-    print(
-        f"开始调用网络搜索工具，核心参数为：{query},{max_results},{topic},{include_raw_content}"
-    )
+    print(f"开始调用网络搜索工具，核心参数为：{query},{max_results},{topic},{include_raw_content}")
     return tavily_client.search(
         query=query,
         max_results=max_results,

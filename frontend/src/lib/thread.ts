@@ -1,4 +1,4 @@
-const STORAGE_KEY = "deepsearch.thread_id";
+const STORAGE_KEY = "deepresearch-studio.thread_id";
 
 export function createThreadId(): string {
   if (crypto.randomUUID) {

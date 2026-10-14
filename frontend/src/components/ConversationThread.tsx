@@ -322,7 +322,7 @@ function AssistantMessage({
       <div className="message-avatar">AI</div>
       <div className="message-bubble">
         <div className="message-meta">
-          <span>DeepSearch Agents</span>
+          <span>DeepResearch Studio</span>
           <time>{syncLabel}</time>
         </div>
 
@@ -333,7 +333,7 @@ function AssistantMessage({
           <summary>
             <span>
               <BranchesOutlined aria-hidden />
-              深度研搜过程
+              深研过程
             </span>
             <strong>{events.length}</strong>
           </summary>

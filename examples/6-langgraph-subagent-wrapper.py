@@ -2,12 +2,12 @@
 DeepAgents 子智能体：接入 LangGraph 研究规划工作流
 
 演示如何把一个已有 LangGraph StateGraph 封装成 DeepAgents 子智能体。
-这个例子不再只是单节点回显，而是模拟“深度研搜”中的研究规划子任务：
+这个例子不再只是单节点回显，而是模拟“深研”中的研究规划子任务：
 用户问题 -> 主智能体决策 -> task 调用 research_planner_graph
 -> LangGraph 子图提取主题 -> 条件边选择普通/深度规划 -> 输出研究计划
 
 对应本仓库已有 LangGraph 知识点：
-- State + add_messages：参考 案例与源码-3-LangGraph框架/03-state/reducers/StateReducer_AddMessages.py
+- State + add_messages：参考 LangGraph 框架源码 03-state/reducers/StateReducer_AddMessages.py
 - 条件边：参考 案例与源码-3-LangGraph框架/05-edge/Edge_Conditional.py
 - 多节点业务流：参考 案例与源码-3-LangGraph框架/01-helloworld/LangGraphBiz.py
 """
@@ -41,11 +41,7 @@ class ResearchPlanState(TypedDict):
 def extract_topic(state: ResearchPlanState):
     """从用户任务中提取研究主题，并判断是否需要深度研究。"""
     task = state["messages"][-1].content
-    depth = (
-        "deep"
-        if any(word in task for word in ["深度", "报告", "系统", "趋势"])
-        else "quick"
-    )
+    depth = "deep" if any(word in task for word in ["深度", "报告", "系统", "趋势"]) else "quick"
     topic = (
         task.replace("请", "")
         .replace("帮我", "")
@@ -101,9 +97,7 @@ def build_deep_plan(state: ResearchPlanState):
 
 def finalize_plan(state: ResearchPlanState):
     """把规划步骤整理成一条 AIMessage，作为 LangGraph 子智能体的返回结果。"""
-    plan_text = "\n".join(
-        f"{index}. {item}" for index, item in enumerate(state["plan"], 1)
-    )
+    plan_text = "\n".join(f"{index}. {item}" for index, item in enumerate(state["plan"], 1))
     final = f"研究主题：{state['topic']}\n研究深度：{state['depth']}\n\n执行计划：\n{plan_text}"
     print("【LangGraph】汇总研究计划")
     return {"messages": [AIMessage(content=final)]}
@@ -143,7 +137,7 @@ main_agent = create_deep_agent(
     tools=[],
     subagents=[research_planner_graph],
     system_prompt="""
-    你是深度研搜系统的主智能体。
+    你是深研系统的主智能体。
     当用户需要研究规划、报告大纲、趋势调研步骤时，必须调用 research_planner_graph。
     你不自己编造研究计划，而是根据子智能体返回的计划整理最终回复。
     """,

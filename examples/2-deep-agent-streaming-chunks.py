@@ -39,9 +39,7 @@ def internet_search(
     DeepAgent 会根据工具描述和参数签名，自动决定是否调用该工具
     include_raw_content=False 时返回摘要内容；True 时会尝试返回更完整的网页原文
     """
-    print(
-        f"开始调用网络搜索工具，核心参数为：{query},{max_results},{topic},{include_raw_content}"
-    )
+    print(f"开始调用网络搜索工具，核心参数为：{query},{max_results},{topic},{include_raw_content}")
     return tavily_client.search(
         query=query,
         max_results=max_results,
@@ -103,12 +101,11 @@ for chunk in stream:
             if last_msg.tool_calls:
                 for tool_call in last_msg.tool_calls:
                     if tool_call["name"] == "task":
-                        print(
-                            f"【大模型】决定调用子智能体：{tool_call['args']['subagent_type']}"
-                        )
+                        print(f"【大模型】决定调用子智能体：{tool_call['args']['subagent_type']}")
                     else:
                         print(
-                            f"【大模型】决定调用工具：{tool_call['name']} 传入的参数：{tool_call['args']}"
+                            f"【大模型】决定调用工具：{tool_call['name']} "
+                            f"传入的参数：{tool_call['args']}"
                         )
 
             # 情况二：模型生成最终结果

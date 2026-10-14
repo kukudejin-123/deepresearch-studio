@@ -26,7 +26,7 @@ os.environ.setdefault("TAVILY_API_KEY", "tvly-test-dummy")
 os.environ.setdefault("CHECKPOINTER_TYPE", "memory")
 os.environ.setdefault(
     "CHECKPOINTER_DB",
-    str(Path(tempfile.gettempdir()) / "deepsearch_agents_test" / "checkpoints.db"),
+    str(Path(tempfile.gettempdir()) / "deepresearch_studio_test" / "checkpoints.db"),
 )
 
 

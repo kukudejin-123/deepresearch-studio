@@ -28,10 +28,10 @@
 
 SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE DATABASE IF NOT EXISTS deepsearch_db
+CREATE DATABASE IF NOT EXISTS deepresearch_db
     DEFAULT CHARACTER SET utf8mb4
     DEFAULT COLLATE utf8mb4_unicode_ci;
-USE deepsearch_db;
+USE deepresearch_db;
 
 -- 表关系总览：
 -- drugs 是药品主表，保存药品基础信息。

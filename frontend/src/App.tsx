@@ -143,7 +143,7 @@ export default function App() {
       <aside className="chat-sidebar" aria-label="会话信息">
         <div className="sidebar-brand">
           <span className="panel-kicker">DEEPSEARCH</span>
-          <h1>深度研搜</h1>
+          <h1>深研</h1>
           <p>对话式多智能体研究台</p>
         </div>
 
@@ -210,7 +210,7 @@ export default function App() {
         <header className="chat-topbar">
           <div>
             <span className="panel-kicker">CHAT WORKSPACE</span>
-            <h2>深度研搜对话</h2>
+            <h2>深研对话</h2>
           </div>
           <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
             {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}

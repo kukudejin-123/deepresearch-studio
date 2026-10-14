@@ -81,8 +81,7 @@ config = {"configurable": {"thread_id": "thread-composite"}}
 # local.txt 会写到本地 agent_workspace
 # /store/memory.txt 会通过 CompositeBackend 路由到 StoreBackend
 user_input = (
-    "1 创建本地文件 local.txt，内容为 本地文件\n"
-    "2 创建记忆文件 /store/memory.txt，内容为 重要记忆"
+    "1 创建本地文件 local.txt，内容为 本地文件\n2 创建记忆文件 /store/memory.txt，内容为 重要记忆"
 )
 print(f"用户指令：{user_input}")
 

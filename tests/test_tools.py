@@ -141,7 +141,7 @@ class TestDbTools:
         """表名列表工具返回逗号拼接的表名"""
         monkeypatch.setenv("MYSQL_USER", "root")
         monkeypatch.setenv("MYSQL_PASSWORD", "root")
-        monkeypatch.setenv("MYSQL_DATABASE", "deepsearch_db")
+        monkeypatch.setenv("MYSQL_DATABASE", "deepresearch_db")
 
         result = mock_connect.list_sql_tables.invoke({})
 
@@ -152,7 +152,7 @@ class TestDbTools:
         """表数据预览返回 CSV 格式（首行列名）"""
         monkeypatch.setenv("MYSQL_USER", "root")
         monkeypatch.setenv("MYSQL_PASSWORD", "root")
-        monkeypatch.setenv("MYSQL_DATABASE", "deepsearch_db")
+        monkeypatch.setenv("MYSQL_DATABASE", "deepresearch_db")
 
         result = mock_connect.get_table_data.invoke({"table_name": "drugs"})
 
