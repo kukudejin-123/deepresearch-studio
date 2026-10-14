@@ -1,9 +1,10 @@
 """
 FastAPI 接口层与项目闭环入口
 
-负责承接前端的任务提交、任务取消、文件上传/下载、输出文件列表查询和
+负责承接前端的任务提交、任务取消、任务查询、文件上传/下载、输出文件列表查询和
 WebSocket 长连接。HTTP 接口只做轻量调度，真正的 DeepAgents 执行放到后台
 任务中；执行进度、工具调用和最终结果由 monitor 按 thread_id 推送给前端。
+任务状态同时写入 SQLite 任务存储，服务重启后仍可查询历史。
 """
 
 import asyncio
@@ -19,6 +20,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -27,21 +29,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.agent.main_agent import run_deep_agent
+from app.agent.checkpointer import close_checkpointer, get_checkpointer
+from app.agent.main_agent import run_deep_agent, task_store
 from app.api.monitor import manager
+from app.utils.logging_config import get_logger, setup_logging
+
+logger = get_logger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
     服务生命周期入口。
 
-    启动时绑定当前事件循环到 WebSocket 管理器，确保后台 Agent 任务可以把
-    monitor 事件投递回 FastAPI 所在的 loop。
+    启动时：初始化日志、绑定事件循环到 WebSocket 管理器、预热 SQLite 检查点表；
+    停机时：关闭检查点数据库连接。
     """
+    setup_logging("INFO")
     loop = asyncio.get_running_loop()
     manager.set_loop(loop)
-    print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
+    # 预热检查点：启动即建表，避免首个任务请求时才感知数据库问题
+    get_checkpointer()
+    logger.info("DeepSearch Agents 服务启动完成")
     yield
+    close_checkpointer()
+    logger.info("DeepSearch Agents 服务已停机")
 
 
 # 当前文件位于 app/api/server.py，运行时目录统一收敛到 app 目录
@@ -96,6 +108,7 @@ async def run_task(request: TaskRequest):
 
     HTTP 请求只负责创建后台协程并立即返回，后续执行轨迹、子智能体调用和最终
     答案都会由 monitor 通过 `/ws/{thread_id}` 推送给同一会话的前端。
+    任务登记信息写入 SQLite，可通过 /api/tasks 查询。
     """
     thread_id = request.thread_id or str(uuid.uuid4())
 
@@ -103,6 +116,8 @@ async def run_task(request: TaskRequest):
     old_task = active_tasks.get(thread_id)
     if old_task and not old_task.done():
         old_task.cancel()
+
+    task_store.create(thread_id, request.query)
 
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
     task = asyncio.create_task(run_deep_agent(request.query, thread_id))
@@ -140,6 +155,32 @@ async def cancel_task(thread_id: str):
 
     _forget_task(thread_id, task)
     return {"status": "cancelled", "thread_id": thread_id}
+
+
+@app.get("/api/tasks")
+async def list_tasks(limit: int = Query(default=50, ge=1, le=200)):
+    """
+    查询最近的任务列表（含状态和时间）
+
+    任务状态来自 SQLite 任务存储，服务重启后历史记录依然可查。
+    :param limit: 返回条数上限，默认 50
+    """
+    tasks = task_store.list(limit=limit)
+    return {"tasks": tasks}
+
+
+@app.get("/api/task/{thread_id}")
+async def get_task(thread_id: str):
+    """
+    查询单个任务的状态详情
+
+    :param thread_id: 任务会话 ID
+    :return: 任务记录；不存在时返回 404
+    """
+    task = task_store.get(thread_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"task": task}
 
 
 @app.post("/api/upload")
@@ -189,6 +230,7 @@ async def download_file(path: str):
         output_abs = output_dir.resolve()
 
         if not abs_path.is_relative_to(output_abs):
+            logger.warning("下载路径越权，已拒绝: %s", abs_path)
             return {"error": "拒绝访问: 只能下载输出目录下的文件"}
     except Exception:
         return {"error": "无效的路径参数"}
@@ -213,19 +255,16 @@ async def list_files(path: str):
     Args:
         path (str): 目标目录的绝对路径 (必须在 output 目录下)。
     """
-    print(f"[DEBUG] 请求文件列表: {path}")
-
     try:
         # 和下载接口保持同一条安全边界：前端只能查看 output 目录内部内容
         abs_path = Path(path).resolve()
         output_abs = output_dir.resolve()
 
         if not abs_path.is_relative_to(output_abs):
-            print(f"[ERROR] 拒绝访问: {abs_path} 不在 {output_abs} 目录下")
+            logger.warning("文件列表路径越权，已拒绝: %s", abs_path)
             return {"error": "拒绝访问: 只能访问输出目录下的文件"}
 
     except Exception as e:
-        print(f"[ERROR] 路径解析失败: {e}")
         return {"error": f"路径无效: {e}"}
 
     if not abs_path.exists():
@@ -248,12 +287,10 @@ async def list_files(path: str):
                 )
 
     except Exception as e:
-        print(f"[ERROR] 遍历文件失败: {e}")
         return {"error": str(e)}
 
     # 最新生成的文件排在前面，方便用户优先看到本次任务产物
     files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
-    print(f"[DEBUG] 找到 {len(files)} 个文件")
     return {"files": files}
 
 
@@ -266,7 +303,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     发送事件时只需要按 thread_id 查找连接，就能把进度推给对应页面。循环中的
     receive_text 用于接收前端心跳，避免连接空闲断开。
     """
-    print(f"会话向我们发起了请求，要求建立连接：{thread_id} 对应：{websocket}")
+    logger.info("WebSocket 连接请求: thread_id=%s", thread_id)
 
     # 连接建立后立即按 thread_id 注册，monitor 后续才能把事件定向推给当前页面
     await manager.connect(websocket, thread_id)
@@ -282,12 +319,13 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     except WebSocketDisconnect:
         # 只移除当前 WebSocket 实例，避免旧连接断开时误删同 thread_id 的新连接
         manager.disconnect(websocket, thread_id)
-        print(f"[WebSocket] 客户端已断开: {thread_id}")
+        logger.info("WebSocket 客户端主动断开: thread_id=%s", thread_id)
 
     except Exception as e:
-        print(f"[WebSocket] 连接异常: {e}")
+        logger.warning("WebSocket 连接异常: thread_id=%s, error=%s", thread_id, e)
         manager.disconnect(websocket, thread_id)
 
 
 if __name__ == "__main__":
-    uvicorn.run("api.server:app", host="0.0.0.0", port=8000, reload=True)
+    setup_logging("INFO")
+    uvicorn.run("app.api.server:app", host="0.0.0.0", port=8000, reload=True)

@@ -3,7 +3,8 @@
 
 负责把模型、主提示词、文件类工具和三个专家子智能体组装成 DeepAgent，
 并提供 run_deep_agent 作为后续 API 层调用的统一入口。运行时还会为每个
-session_id 创建独立工作目录，并把工具调用、子智能体调用和最终结果推送给前端。
+session_id 创建独立工作目录，把任务状态写入 SQLite 任务存储，
+并把工具调用、子智能体调用和最终结果推送给前端。
 """
 
 import asyncio
@@ -11,8 +12,8 @@ import shutil
 from pathlib import Path
 
 from deepagents import create_deep_agent
-from langgraph.checkpoint.memory import InMemorySaver
 
+from app.agent.checkpointer import get_checkpointer
 from app.agent.llm import model
 from app.agent.prompts import main_agent_content
 from app.agent.subagents.database_query_agent import database_query_agent
@@ -24,26 +25,38 @@ from app.api.context import (
     set_thread_context,
 )
 from app.api.monitor import monitor
+from app.api.task_store import (
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    TaskStore,
+)
+from app.utils.logging_config import get_logger, setup_logging
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
 from app.tools.pdf_tools import convert_md_to_pdf
 from app.tools.upload_file_read_tool import read_file_content
 
+logger = get_logger(__name__)
+
 # 主智能体是调度中心：
 # 1. tools 只放最终交付相关的文件工具
-# 2. subagents 放网络、数据库、RAGFlow 三类信息获取助手
-# 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文
+# 2. subagents 放网络、数据库、知识库三类信息获取助手
+# 3. checkpointer 通过 thread_id 保存同一会话中的执行上下文（默认 SQLite 持久化）
 main_agent = create_deep_agent(
     model=model,
     system_prompt=main_agent_content["system_prompt"],
     tools=[generate_markdown, convert_md_to_pdf, read_file_content],
-    checkpointer=InMemorySaver(),
+    checkpointer=get_checkpointer(),
     subagents=[database_query_agent, network_search_agent, knowledge_base_agent],
 )
 
 # 当前文件位于 app/agent/main_agent.py，parents[1] 即 app 目录
 project_root_path = Path(__file__).parents[1].resolve()
+
+# 任务生命周期存储：与检查点数据库同目录，服务重启后历史任务仍可查询
+task_store = TaskStore(project_root_path / "data" / "checkpoints.db")
 
 
 async def run_deep_agent(task_query, session_id):
@@ -55,7 +68,7 @@ async def run_deep_agent(task_query, session_id):
     :param task_query: 前端提交的原始任务问题
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
     """
-    print(f"[MainAgent] 开始执行会话，session_id={session_id}")
+    logger.info("开始执行会话，session_id=%s", session_id)
 
     # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
     session_dir = project_root_path / "output" / f"session_{session_id}"
@@ -137,17 +150,26 @@ async def run_deep_agent(task_query, session_id):
                                     )
                         elif last_msg.content:
                             # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
-                            print(
-                                f"主智能体执行结果，最终结果：{last_msg.content[:100]}"
+                            logger.info(
+                                "主智能体产出结果，session_id=%s，内容片段: %s",
+                                session_id,
+                                last_msg.content[:100],
                             )
                             monitor.report_task_result(last_msg.content)
 
+        task_store.set_status(session_id, STATUS_COMPLETED)
+        logger.info("会话执行完成，session_id=%s", session_id)
+
     except asyncio.CancelledError:
+        task_store.set_status(session_id, STATUS_CANCELLED)
         monitor.report_task_cancelled()
+        logger.info("会话已被取消，session_id=%s", session_id)
         raise
     except Exception as e:
-        # 异步执行异常也走 monitor，保证前端能收到明确错误事件
+        # 异步执行异常也走 monitor 和任务存储，保证前端能收到明确错误事件、历史可排查
+        task_store.set_status(session_id, STATUS_FAILED, error=str(e))
         monitor._emit("error", f"执行主智能发生异常信息：{str(e)}")
+        logger.exception("主智能体执行异常，session_id=%s", session_id)
     finally:
         # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
         reset_session_context(session_dir_token, session_id_token)
@@ -156,6 +178,7 @@ async def run_deep_agent(task_query, session_id):
 if __name__ == "__main__":
     import asyncio
 
+    setup_logging("INFO")
     asyncio.run(
         run_deep_agent("从网络查询机器人信息，并生成Markdown文件", "test_session_001")
     )
