@@ -6,14 +6,18 @@ import {
   CloudServerOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
+  LogoutOutlined,
   ToolOutlined
 } from "@ant-design/icons";
 import { Alert, App as AntApp, Button } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
+import { AuthPanel } from "./components/AuthPanel";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
+import { getStoredUser, getToken, logout } from "./lib/auth";
+import type { AuthUser } from "./lib/auth";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import type { ConnectionState, UploadedItem } from "./types";
 
@@ -40,6 +44,24 @@ function createTurn(content: string): ChatTurn {
 }
 
 export default function App() {
+  // 登录态来自本地存储的 JWT；无 token 时整个研究台不渲染，
+  // 也不会建立 WebSocket 连接
+  const [user, setUser] = useState<AuthUser | null>(() =>
+    getToken() ? getStoredUser() : null
+  );
+
+  if (!user) {
+    return (
+      <AntApp>
+        <AuthPanel onAuthenticated={setUser} />
+      </AntApp>
+    );
+  }
+
+  return <ResearchConsole user={user} onLogout={() => setUser(null)} />;
+}
+
+function ResearchConsole({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
   const { message } = AntApp.useApp();
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
@@ -78,7 +100,7 @@ export default function App() {
         behavior: "smooth"
       });
     });
-  }, [turns]);
+  }, [turns.length]);
 
   async function handleSubmit() {
     const cleanQuery = query.trim();
@@ -129,126 +151,151 @@ export default function App() {
     }
   }
 
-  function handleNewSession() {
+  const handleNewSession = useCallback(() => {
     session.resetSession();
     setTurns([]);
     setQuery("");
     setStagedItems([]);
-  }
+  }, [session]);
+
+  const handleLogout = useCallback(() => {
+    logout();
+    onLogout();
+    message.success("已退出登录");
+  }, [onLogout]);
 
   const online = session.connectionState === "connected";
 
   return (
-    <div className="chat-app-shell min-h-dvh">
-      <aside className="chat-sidebar" aria-label="会话信息">
-        <div className="sidebar-brand">
-          <span className="panel-kicker">DEEPSEARCH</span>
-          <h1>深研</h1>
-          <p>对话式多智能体研究台</p>
-        </div>
-
-        <Button className="new-chat-button" block onClick={handleNewSession}>
-          新建研搜
-        </Button>
-
-        <div className="sidebar-section">
-          <span className="sidebar-label">THREAD</span>
-          <strong className="thread-id" title={session.threadId}>
-            {session.threadId.slice(0, 8)}
-          </strong>
-        </div>
-
-        <div className="sidebar-status-list">
-          <div className={`sidebar-status ${online ? "sidebar-status--online" : "sidebar-status--warn"}`}>
-            <ApiOutlined aria-hidden />
-            <span>WebSocket</span>
-            <strong>{connectionLabel(session.connectionState)}</strong>
+    <AntApp>
+      <div className="chat-app-shell min-h-dvh">
+        <aside className="chat-sidebar" aria-label="会话信息">
+          <div className="sidebar-brand">
+            <span className="panel-kicker">DEEPSEARCH STUDIO</span>
+            <h1>深研</h1>
+            <p>对话式多智能体研究台</p>
           </div>
-          <div className="sidebar-status">
-            <BranchesOutlined aria-hidden />
-            <span>助手调度</span>
-            <strong>{session.stats.assistantEvents}</strong>
-          </div>
-          <div className="sidebar-status">
-            <ToolOutlined aria-hidden />
-            <span>工具调用</span>
-            <strong>{session.stats.toolEvents}</strong>
-          </div>
-          <div className={session.stats.errorEvents > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
-            <CloseCircleOutlined aria-hidden />
-            <span>异常</span>
-            <strong>{session.stats.errorEvents}</strong>
-          </div>
-        </div>
 
-        <div className="sidebar-section">
-          <span className="sidebar-label">AGENTS</span>
-          <ul className="agent-mini-list">
-            <li>
-              <CloudServerOutlined aria-hidden />
-              网络搜索助手
-            </li>
-            <li>
-              <DatabaseOutlined aria-hidden />
-              数据库查询助手
-            </li>
-            <li>
-              <FileSearchOutlined aria-hidden />
-              知识库助手
-            </li>
-          </ul>
-        </div>
+          <Button className="new-chat-button" block onClick={handleNewSession}>
+            新建研搜
+          </Button>
 
-        <div className="sidebar-section sidebar-endpoints">
-          <span className="sidebar-label">ENDPOINTS</span>
-          <code>{API_BASE_URL}</code>
-          <code>{WS_BASE_URL}</code>
-        </div>
-      </aside>
-
-      <main className="chat-main">
-        <header className="chat-topbar">
-          <div>
-            <span className="panel-kicker">CHAT WORKSPACE</span>
-            <h2>深研对话</h2>
+          <div className="sidebar-section">
+            <span className="sidebar-label">USER</span>
+            <div className="sidebar-user">
+              <strong className="sidebar-username" title={user.username}>
+                {user.username}
+              </strong>
+              <Button
+                icon={<LogoutOutlined aria-hidden />}
+                size="small"
+                type="text"
+                onClick={handleLogout}
+              >
+                退出
+              </Button>
+            </div>
           </div>
-          <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
-            {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
-            {session.isRunning ? "研搜中" : "待命"}
-          </div>
-        </header>
 
-        {session.lastError ? (
-          <Alert
-            className="chat-alert"
-            message={session.lastError}
-            showIcon
-            type="error"
+          <div className="sidebar-section">
+            <span className="sidebar-label">THREAD</span>
+            <strong className="thread-id" title={session.threadId}>
+              {session.threadId.slice(0, 8)}
+            </strong>
+          </div>
+
+          <div className="sidebar-status-list">
+            <div className={`sidebar-status ${online ? "sidebar-status--online" : "sidebar-status--warn"}`}>
+              <ApiOutlined aria-hidden />
+              <span>WebSocket</span>
+              <strong>{connectionLabel(session.connectionState)}</strong>
+            </div>
+            <div className="sidebar-status">
+              <BranchesOutlined aria-hidden />
+              <span>助手调度</span>
+              <strong>{session.stats.assistantEvents}</strong>
+            </div>
+            <div className="sidebar-status">
+              <ToolOutlined aria-hidden />
+              <span>工具调用</span>
+              <strong>{session.stats.toolEvents}</strong>
+            </div>
+            <div className={session.stats.errorEvents > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
+              <CloseCircleOutlined aria-hidden />
+              <span>异常</span>
+              <strong>{session.stats.errorEvents}</strong>
+            </div>
+          </div>
+
+          <div className="sidebar-section">
+            <span className="sidebar-label">AGENTS</span>
+            <ul className="agent-mini-list">
+              <li>
+                <CloudServerOutlined aria-hidden />
+                网络搜索助手
+              </li>
+              <li>
+                <DatabaseOutlined aria-hidden />
+                数据库查询助手
+              </li>
+              <li>
+                <FileSearchOutlined aria-hidden />
+                知识库助手
+              </li>
+            </ul>
+          </div>
+
+          <div className="sidebar-section sidebar-endpoints">
+            <span className="sidebar-label">ENDPOINTS</span>
+            <code>{API_BASE_URL}</code>
+            <code>{WS_BASE_URL}</code>
+          </div>
+        </aside>
+
+        <main className="chat-main">
+          <header className="chat-topbar">
+            <div>
+              <span className="panel-kicker">CHAT WORKSPACE</span>
+              <h2>深研对话</h2>
+            </div>
+            <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
+              {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
+              {session.isRunning ? "研搜中" : "待命"}
+            </div>
+          </header>
+
+          {session.lastError ? (
+            <Alert
+              className="chat-alert"
+              message={session.lastError}
+              showIcon
+              type="error"
+            />
+          ) : null}
+
+          <section className="chat-stream-panel" ref={streamRef}>
+            <ConversationThread
+              onUseExample={setQuery}
+              turns={turns}
+            />
+          </section>
+
+          <ChatComposer
+            isCancelling={session.isCancelling}
+            isRunning={session.isRunning}
+            isUploading={session.isUploading}
+            onCancel={handleCancel}
+            onNewSession={handleNewSession}
+            onQueryChange={setQuery}
+            onStagedItemsChange={setStagedItems}
+            onSubmit={handleSubmit}
+            onUpload={handleUpload}
+            query={query}
+            stagedItems={stagedItems}
+            uploadedItems={session.uploadedItems}
           />
-        ) : null}
-
-        <section className="chat-stream-panel" ref={streamRef}>
-          <ConversationThread
-            onUseExample={setQuery}
-            turns={turns}
-          />
-        </section>
-
-        <ChatComposer
-          isCancelling={session.isCancelling}
-          isRunning={session.isRunning}
-          isUploading={session.isUploading}
-          onCancel={handleCancel}
-          onNewSession={handleNewSession}
-          onQueryChange={setQuery}
-          onStagedItemsChange={setStagedItems}
-          onSubmit={handleSubmit}
-          onUpload={handleUpload}
-          query={query}
-          stagedItems={stagedItems}
-          uploadedItems={session.uploadedItems}
-        />
-      </main>
-    </div>
+        </main>
+      </div>
+    </AntApp>
   );
 }

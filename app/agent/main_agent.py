@@ -24,6 +24,7 @@ from app.api.context import (
     reset_session_context,
     set_session_context,
     set_thread_context,
+    set_user_context,
 )
 from app.api.monitor import monitor
 from app.api.task_store import (
@@ -90,28 +91,38 @@ task_store = TaskStore(
 )
 
 
-async def run_deep_agent(task_query, session_id):
+async def run_deep_agent(task_query, session_id, user_id=None):
     """
     异步流式执行主智能体
 
-    API 层会为每次任务传入用户问题和 session_id。本函数负责准备会话目录、
-    复制上传文件、写入 ContextVar，并在流式执行过程中把关键事件上报给前端。
+    API 层会为每次任务传入用户问题、session_id 和 user_id。本函数负责准备
+    会话目录（按用户隔离）、复制上传文件、写入 ContextVar，并在流式执行
+    过程中把关键事件上报给前端。
     :param task_query: 前端提交的原始任务问题
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
+    :param user_id: 任务归属用户；匿名执行（脚本调试）时为 None
     """
-    logger.info("开始执行会话，session_id=%s", session_id)
+    logger.info("开始执行会话，session_id=%s, user_id=%s", session_id, user_id)
 
-    # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
-    session_dir = project_root_path / "output" / f"session_{session_id}"
+    # 每个用户、每个会话独立使用 output/user_{user_id}/session_{session_id}，
+    # 避免不同用户、不同任务的产物互相覆盖，也让文件接口能按用户收紧边界
+    if user_id is not None:
+        session_dir = project_root_path / "output" / f"user_{user_id}" / f"session_{session_id}"
+        updated_dir_path = (
+            project_root_path / "updated" / f"user_{user_id}" / f"session_{session_id}"
+        )
+    else:
+        session_dir = project_root_path / "output" / f"session_{session_id}"
+        updated_dir_path = project_root_path / "updated" / f"session_{session_id}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # 前端和工具使用绝对路径；提示词里只给模型相对路径，降低模型误用系统绝对路径的概率
     session_dir_str = str(session_dir).replace("\\", "/")
     relative_session_dir_str = str(session_dir.relative_to(project_root_path)).replace("\\", "/")
 
-    # 上传文件先落在 updated/session_{session_id}，执行前复制到本次 output 工作目录
-    # 这样读文件工具和生成文件工具都只需要围绕同一个 session_dir 工作
-    updated_dir_path = project_root_path / "updated" / f"session_{session_id}"
+    # 上传文件先落在 updated/user_{user_id}/session_{session_id}，执行前复制到
+    # 本次 output 工作目录；这样读文件工具和生成文件工具都只围绕同一个
+    # session_dir 工作，且天然按用户隔离
     updated_info_prompt = ""
     if updated_dir_path.exists():
         files = [f.name for f in updated_dir_path.iterdir() if f.is_file()]
@@ -127,9 +138,11 @@ async def run_deep_agent(task_query, session_id):
                 + "\n    请优先使用工具（read_file_content）读取并参考这些文件。"
             )
 
-    # ContextVar 让深层工具无需显式传参，也能拿到当前会话目录和 WebSocket thread_id
+    # ContextVar 让深层工具无需显式传参，也能拿到当前会话目录、
+    # WebSocket thread_id 和用户身份（知识库工具据此做资源隔离）
     session_dir_token = set_session_context(session_dir_str)
     session_id_token = set_thread_context(session_id)
+    user_token = set_user_context(user_id)
 
     # 前端拿到工作目录后，可以展示本次任务生成的 Markdown/PDF 等产物
     monitor.report_session_dir(session_dir_str)
@@ -198,7 +211,7 @@ async def run_deep_agent(task_query, session_id):
         logger.exception("主智能体执行异常，session_id=%s", session_id)
     finally:
         # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
-        reset_session_context(session_dir_token, session_id_token)
+        reset_session_context(session_dir_token, session_id_token, user_token)
 
 
 if __name__ == "__main__":

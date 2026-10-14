@@ -167,18 +167,110 @@ class TestDbTools:
         with pytest.raises(ValueError, match="缺失数据库核心配置"):
             mock_connect.get_db_config()
 
+    def test_execute_sql_rejects_drop(self, mock_connect, monkeypatch):
+        """工具层拦截 DROP：不连接数据库，直接返回安全策略提示"""
+        monkeypatch.setenv("MYSQL_USER", "root")
+        monkeypatch.setenv("MYSQL_PASSWORD", "root")
+        monkeypatch.setenv("MYSQL_DATABASE", "deepresearch_db")
+
+        result = mock_connect.execute_sql_query.invoke({"query": "DROP TABLE drugs"})
+
+        assert "拒绝" in result
+        assert "DROP" in result
+
+    def test_get_table_data_rejects_injection(self, mock_connect, monkeypatch):
+        """表名含注入字符时被白名单拦截"""
+        monkeypatch.setenv("MYSQL_USER", "root")
+        monkeypatch.setenv("MYSQL_PASSWORD", "root")
+        monkeypatch.setenv("MYSQL_DATABASE", "deepresearch_db")
+
+        result = mock_connect.get_table_data.invoke({"table_name": "drugs; DROP TABLE users"})
+
+        assert "非法字符" in result
+
+
+class TestKnowledgeBaseUserIsolation:
+    """知识库按用户隔离验证"""
+
+    @pytest.fixture
+    def store_root(self, tmp_path, monkeypatch):
+        """构造共享库 + 两个用户私有库"""
+        import json
+
+        from app.api.context import set_user_context
+        from app.rag.vector_store import VectorKnowledgeBase
+        from app.tools import vector_store_tools
+
+        root = tmp_path / "vector_store"
+
+        def make_collection(base_dir, name, file_name):
+            # 集合目录使用 ASCII slug（与线上一致），中文名只存在于 meta.json
+            slug = VectorKnowledgeBase(base_dir)._slugify(name)
+            collection_dir = base_dir / slug
+            collection_dir.mkdir(parents=True, exist_ok=True)
+            (collection_dir / "meta.json").write_text(
+                json.dumps({"name": name, "chunk_count": 1, "file_names": [file_name]}),
+                encoding="utf-8",
+            )
+
+        # 共享库：公开演示数据
+        make_collection(root, "共享集合", "public.pdf")
+        # 用户 1 私有库
+        make_collection(root / "user_1", "用户1私有", "mine.pdf")
+        # 用户 2 私有库
+        make_collection(root / "user_2", "用户2私有", "theirs.pdf")
+
+        monkeypatch.setenv("VECTOR_STORE_DIR", str(root))
+        yield vector_store_tools, set_user_context
+
+    def test_user_sees_own_and_shared(self, store_root):
+        """用户能看到自己的私有集合和共享集合"""
+        tools_module, set_user_context = store_root
+        set_user_context(1)
+        try:
+            result = tools_module.list_knowledge_collections.invoke({})
+        finally:
+            set_user_context(None)
+
+        assert "用户1私有" in result
+        assert "共享集合" in result
+
+    def test_user_cannot_see_other_private(self, store_root):
+        """用户看不到其他用户的私有集合"""
+        tools_module, set_user_context = store_root
+        set_user_context(2)
+        try:
+            result = tools_module.list_knowledge_collections.invoke({})
+        finally:
+            set_user_context(None)
+
+        assert "用户2私有" in result
+        assert "用户1私有" not in result
+
+    def test_anonymous_sees_shared_only(self, store_root):
+        """匿名上下文只能看到共享集合"""
+        tools_module, _ = store_root
+
+        result = tools_module.list_knowledge_collections.invoke({})
+
+        assert "共享集合" in result
+        assert "用户1私有" not in result
+        assert "用户2私有" not in result
+
 
 class TestVectorStoreTools:
     """vector_store_tools 工具验证（临时向量库目录）"""
 
     @pytest.fixture
     def kb_with_collection(self, tmp_path, monkeypatch):
-        """构造一个包含假集合元数据的向量库目录，并替换工具内的知识库实例"""
-        from app.rag.vector_store import VectorKnowledgeBase
+        """构造包含假集合元数据的向量库目录，通过环境变量指向它"""
         from app.tools import vector_store_tools
 
         store_root = tmp_path / "vector_store"
-        collection_dir = store_root / "测试集合"
+        # 集合目录使用 ASCII slug（与线上一致），中文名只存在于 meta.json
+        from app.rag.vector_store import VectorKnowledgeBase
+
+        collection_dir = store_root / VectorKnowledgeBase(store_root)._slugify("测试集合")
         collection_dir.mkdir(parents=True)
         import json
 
@@ -195,7 +287,7 @@ class TestVectorStoreTools:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setattr(vector_store_tools, "knowledge_base", VectorKnowledgeBase(store_root))
+        monkeypatch.setenv("VECTOR_STORE_DIR", str(store_root))
         return vector_store_tools
 
     def test_list_collections(self, kb_with_collection):

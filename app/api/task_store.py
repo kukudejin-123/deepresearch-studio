@@ -7,8 +7,8 @@
     running -> completed / failed / cancelled
 
 任务状态独立于 LangGraph 检查点：检查点保存的是 Agent 执行上下文，
-本模块保存的是任务级元数据（提交时间、结束时间、错误信息），
-用于任务列表查询、失败排查和后续接入任务队列。
+本模块保存的是任务级元数据（提交时间、结束时间、错误信息、归属用户），
+用于任务列表查询、失败排查、跨用户资源隔离和后续接入任务队列。
 """
 
 import sqlite3
@@ -28,6 +28,7 @@ STATUS_CANCELLED = "cancelled"
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (
     thread_id TEXT PRIMARY KEY,
+    user_id INTEGER,
     query TEXT NOT NULL,
     status TEXT NOT NULL,
     error TEXT,
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 
 class TaskStore:
-    """基于 SQLite 的任务生命周期存储，线程安全（check_same_thread=False + 短连接操作）"""
+    """基于 SQLite 的任务生命周期存储，线程安全（短连接操作 + SQLite 自身锁）"""
 
     def __init__(self, db_path: str | Path):
         """
@@ -57,28 +58,44 @@ class TaskStore:
     def _init_table(self) -> None:
         with self._connect() as conn:
             conn.execute(_CREATE_TABLE_SQL)
+            self._migrate_user_id(conn)
 
-    def create(self, thread_id: str, query: str) -> None:
+    @staticmethod
+    def _migrate_user_id(conn: sqlite3.Connection) -> None:
+        """
+        旧版数据库补 user_id 列
+
+        早期版本 tasks 表没有 user_id 字段；ALTER TABLE ADD COLUMN 是
+        SQLite 支持的原位迁移，重复执行时忽略“列已存在”错误。
+        """
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        if "user_id" not in columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER")
+            logger.info("tasks 表已增加 user_id 列（旧库迁移）")
+
+    def create(self, thread_id: str, query: str, user_id: Optional[int] = None) -> None:
         """
         登记一个新任务（状态为 running）
 
         :param thread_id: 任务会话 ID
         :param query: 用户提交的任务内容
+        :param user_id: 任务归属用户；匿名任务为 None
         """
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO tasks (thread_id, query, status, created_at, updated_at)
-                VALUES (?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+                INSERT INTO tasks (thread_id, user_id, query, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
                 ON CONFLICT(thread_id) DO UPDATE SET
+                    user_id = excluded.user_id,
                     query = excluded.query,
                     status = excluded.status,
                     error = NULL,
                     updated_at = excluded.updated_at
                 """,
-                (thread_id, query, STATUS_RUNNING),
+                (thread_id, user_id, query, STATUS_RUNNING),
             )
-        logger.info("任务已登记: thread_id=%s", thread_id)
+        logger.info("任务已登记: thread_id=%s, user_id=%s", thread_id, user_id)
 
     def set_status(
         self,
@@ -114,16 +131,30 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE thread_id = ?", (thread_id,)).fetchone()
         return dict(row) if row else None
 
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list(
+        self,
+        user_id: Optional[int] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         """
         查询最近的任务列表
 
+        :param user_id: 只返回该用户的任务；None 表示不过滤（管理用途）
         :param limit: 返回条数上限
         :return: 任务字典列表，按更新时间倒序（同一秒内的按提交顺序倒序）
         """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY updated_at DESC, rowid DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if user_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM tasks ORDER BY updated_at DESC, rowid DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM tasks WHERE user_id = ?
+                    ORDER BY updated_at DESC, rowid DESC LIMIT ?
+                    """,
+                    (user_id, limit),
+                ).fetchall()
         return [dict(row) for row in rows]

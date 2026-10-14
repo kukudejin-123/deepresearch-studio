@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cancelTask, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import { getToken } from "../lib/auth";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
@@ -82,7 +83,12 @@ export function useDeepAgentSession() {
       socketRef.current?.close();
       setConnectionState(hadSocket ? "reconnecting" : "connecting");
 
-      const socket = new WebSocket(`${WS_BASE_URL}/ws/${encodeURIComponent(threadId)}`);
+      // 浏览器 WebSocket 不支持自定义请求头，JWT 通过 query 参数传递
+      const token = getToken();
+      const wsUrl = `${WS_BASE_URL}/ws/${encodeURIComponent(threadId)}${
+        token ? `?token=${encodeURIComponent(token)}` : ""
+      }`;
+      const socket = new WebSocket(wsUrl);
       socketRef.current = socket;
 
       socket.onopen = () => {

@@ -90,8 +90,16 @@
 - **工程化前后端结构清晰**
   - 基于 `FastAPI + WebSocket + DeepAgents + React` 组织任务接口、异步执行、事件推送、文件上传和文件下载。
 - **测试与 CI 全覆盖**
-  - 67 个 pytest 用例覆盖路径解析与写入边界、文件工具、数据库工具（mock）、向量库全链路（FakeEmbeddings）、检查点、任务存储、API/WebSocket、智能体组装；
+  - 159 个 pytest 用例覆盖路径解析与写入边界、文件工具、数据库工具（mock）、向量库全链路（FakeEmbeddings）、检查点、任务存储、认证与资源隔离、API/WebSocket、智能体组装；
   - GitHub Actions 流水线：ruff lint + ruff format + pytest。
+- **多用户体系与资源隔离（第一期安全改造）**
+  - 注册 / 登录 + JWT 认证，除认证接口外的所有资源接口默认要求登录；
+  - 任务、上传文件、输出目录、私有知识库全部按 `user_id` 隔离，接口层校验资源归属，跨用户访问一律按 404 拒绝；
+  - 前端带登录/注册页，JWT 经 Authorization 头与 WebSocket query 参数传递。
+- **工具层与接口层硬安全校验**
+  - SQL 工具：只读校验（仅 SELECT/SHOW/WITH/EXPLAIN）、DDL/DML 关键字黑名单、多语句拦截、注释绕过防护、表名白名单；
+  - 上传：扩展名白名单、单文件大小上限（流式实时校验）、文件名清洗（防路径穿越）；
+  - 限流：任务提交按用户、登录按 IP+用户名，超限返回 429。
 
 这套课程与改造实践十分适合这些场景：
 
@@ -141,7 +149,8 @@
 | 文件处理       | `pypdf` / `python-docx` / `pandas` / `ReportLab` | 读取上传附件，生成 Markdown，转换 PDF                                         |
 | 后端接口       | `FastAPI` / `Uvicorn`                            | 提供任务、取消、上传、文件列表、下载和 WebSocket 接口                         |
 | 实时通信       | `WebSocket`                                      | 推送工具调用、助手调用、最终结果和错误事件                                    |
-| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 提供对话式研搜界面、事件流、附件上传和文件下载                                |
+| 用户认证       | `PyJWT` / `pbkdf2-hmac`                          | 注册登录、JWT 签发校验、密码哈希存储                                          |
+| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 提供登录注册、对话式研搜界面、事件流、附件上传和文件下载                      |
 | 测试与 CI      | `pytest` / `ruff` / `GitHub Actions`             | 单元与接口测试、代码规范检查、持续集成                                        |
 | 依赖管理       | `uv` / `pnpm`                                    | 管理 Python 后端和前端依赖                                                    |
 
@@ -152,15 +161,18 @@ deepresearch-studio/
 ├── app/
 │   ├── agent/
 │   │   ├── subagents/              # 网络搜索、数据库查询、知识库三个子智能体
-│   │   ├── checkpointer.py         # SQLite/内存检查点工厂（新增）
+│   │   ├── checkpointer.py         # SQLite/内存检查点工厂
 │   │   ├── llm.py                  # OpenAI 兼容模型初始化
 │   │   ├── main_agent.py           # 主智能体组装与 run_deep_agent 执行入口
 │   │   └── prompts.py              # 读取 app/prompt/prompts.yml
 │   ├── api/
-│   │   ├── context.py              # ContextVar 保存 thread_id 和 session_dir
+│   │   ├── auth.py                 # 用户存储、JWT 认证、登录依赖（新增）
+│   │   ├── context.py              # ContextVar 保存 thread_id、session_dir 和 user_id
 │   │   ├── monitor.py              # 工具调用、助手调用、结果和异常事件推送
-│   │   ├── server.py               # FastAPI 任务、上传、文件、下载、WebSocket 接口
-│   │   └── task_store.py           # SQLite 任务生命周期存储（新增）
+│   │   ├── rate_limit.py           # 滑动窗口限流器（新增）
+│   │   ├── server.py               # FastAPI 全部接口
+│   │   ├── task_store.py           # SQLite 任务生命周期存储（含归属用户）
+│   │   └── upload_guard.py         # 上传文件校验与清洗（新增）
 │   ├── prompt/
 │   │   └── prompts.yml             # 主智能体和子智能体提示词配置
 │   ├── rag/                        # 本地向量知识库（替代原 ragflow 目录）
@@ -168,18 +180,19 @@ deepresearch-studio/
 │   │   ├── ingest.py               # 文档入库脚本：docs/knowledge_base -> FAISS
 │   │   └── vector_store.py         # FAISS 集合管理与检索
 │   ├── tools/                      # Tavily、MySQL、向量库、文件读取、Markdown、PDF 工具
+│   │   └── sql_guard.py            # SQL 只读校验与表名白名单（新增）
 │   ├── utils/                      # 路径解析、日志配置、Markdown/PDF 底层转换
-│   ├── data/                       # 运行时生成：向量库索引与检查点数据库（git 忽略）
-│   ├── output/                     # 运行时生成：每个会话的 Markdown、PDF 等产物
-│   └── updated/                    # 运行时生成：用户上传文件的会话暂存目录
-├── tests/                          # pytest 测试套件（新增）
-├── .github/workflows/ci.yml        # GitHub Actions 持续集成（新增）
+│   ├── data/                       # 运行时生成：向量库索引、检查点与用户数据库（git 忽略）
+│   ├── output/                     # 运行时生成：按用户/会话隔离的 Markdown、PDF 等产物
+│   └── updated/                    # 运行时生成：按用户/会话隔离的上传暂存目录
+├── tests/                          # pytest 测试套件
+├── .github/workflows/ci.yml        # GitHub Actions 持续集成
 ├── docker/
 │   ├── docker-compose.yaml         # 本地 MySQL 教学环境
 │   └── mysql/mysql.sql             # 药品、库存、销售记录模拟数据
 ├── docs/knowledge_base/            # 知识库示例 PDF（入库脚本的数据源）
 ├── examples/                       # DeepAgents 章节示例脚本
-├── frontend/                       # React + Vite 前端项目
+├── frontend/                       # React + Vite 前端项目（含登录注册页）
 ├── .env.example                    # 环境变量示例
 ├── pyproject.toml                  # Python 项目依赖与工具链声明
 ├── requirements.txt                # 依赖清单
@@ -242,6 +255,12 @@ VECTOR_STORE_DIR=app/data/vector_store
 CHECKPOINTER_TYPE=sqlite
 CHECKPOINTER_DB=app/data/checkpoints.db
 
+# 用户认证：AUTH_ENABLED=false 可退化为开发用户（免登录调试）
+AUTH_ENABLED=true
+JWT_SECRET=请改成足够长的随机密钥
+JWT_EXPIRE_MINUTES=1440
+AUTH_DB=app/data/users.db
+
 # MySQL 配置
 MYSQL_USER=root
 MYSQL_PASSWORD=root
@@ -285,16 +304,23 @@ uv run uvicorn app.api.server:app --host 0.0.0.0 --port 8000 --reload
 
 后端默认接口：
 
-| 接口                                | 说明                                   |
-| ----------------------------------- | -------------------------------------- |
-| `POST /api/task`                    | 启动一次 DeepAgents 后台任务           |
-| `POST /api/task/{thread_id}/cancel` | 取消指定会话任务                       |
-| `GET /api/tasks`                    | 查询最近任务列表及状态（新增）         |
-| `GET /api/task/{thread_id}`         | 查询单个任务状态详情（新增）           |
-| `POST /api/upload`                  | 上传一个或多个文件到当前会话           |
-| `GET /api/files`                    | 列出当前会话输出目录中的生成文件       |
-| `GET /api/download`                 | 下载输出目录中的文件                   |
-| `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、结果和异常事件 |
+| 接口                                | 说明                                         |
+| ----------------------------------- | -------------------------------------------- |
+| `POST /api/auth/register`           | 注册新用户并直接返回 JWT（新增）             |
+| `POST /api/auth/login`              | 登录并签发 JWT（新增）                       |
+| `GET /api/auth/me`                  | 查询当前登录用户（新增）                     |
+| `POST /api/task`                    | 启动一次 DeepAgents 后台任务（需登录、限流） |
+| `POST /api/task/{thread_id}/cancel` | 取消指定会话任务（校验归属）                 |
+| `GET /api/tasks`                    | 查询本人最近任务列表及状态                   |
+| `GET /api/task/{thread_id}`         | 查询本人单个任务状态详情                     |
+| `POST /api/upload`                  | 上传文件到本人会话目录（类型/大小校验）      |
+| `GET /api/files`                    | 列出本人输出目录中的生成文件                 |
+| `GET /api/download`                 | 下载本人输出目录中的文件                     |
+| `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、结果和异常事件       |
+
+除注册/登录外的接口都需要 JWT 认证：HTTP 接口走 `Authorization: Bearer <token>`
+请求头；浏览器 `<a href>` 直链下载额外支持 `?token=` 查询参数；
+WebSocket 走 `?token=` 查询参数（浏览器 WebSocket 不支持自定义请求头）。
 
 ### 8. 启动前端
 
@@ -317,6 +343,10 @@ WS:  ws://localhost:8000
 VITE_API_BASE_URL=http://localhost:8000
 VITE_WS_BASE_URL=ws://localhost:8000
 ```
+
+首次打开页面会进入登录/注册页：注册账号后自动登录，任务、上传文件、
+输出产物和私有知识库都按用户隔离。本地调试如果不想走登录流程，可以设置
+`AUTH_ENABLED=false` 退化为单一开发用户。
 
 ### 9. 试几个任务
 
@@ -373,16 +403,48 @@ uv run ruff format --check app tests  # 格式检查
 
 ### 4. 测试与 CI
 
-- 新增 `tests/`：67 个用例，覆盖路径解析与写入边界（含 `../` 穿越防护）、文件工具、数据库工具（mock MySQL 连接）、向量库全链路（FakeEmbeddings 确定性向量）、检查点两种模式、任务存储、FastAPI 接口与 WebSocket、智能体组装；
+- 新增 `tests/`：159 个用例，覆盖路径解析与写入边界（含 `../` 穿越防护）、文件工具、数据库工具（mock MySQL 连接）、向量库全链路（FakeEmbeddings 确定性向量）、检查点两种模式、任务存储、认证与跨用户隔离、上传与限流、FastAPI 接口与 WebSocket、智能体组装；
 - 新增 `.github/workflows/ci.yml`：ruff lint + ruff format + pytest；
 - `pyproject.toml` 增加 `dev` 依赖组（pytest、pytest-asyncio、pytest-cov、ruff、httpx）与工具链配置。
 
-### 5. 健壮性与日志
+### 5. 第一期：安全与多用户基础
+
+**用户体系**
+
+- 新增 `app/api/auth.py`：SQLite 用户存储、PBKDF2-SHA256 密码哈希（标准库实现，随机盐 + 10 万次迭代）、PyJWT 签发与校验、`get_current_user` FastAPI 依赖；
+- 新增接口：`POST /api/auth/register`（注册即登录）、`POST /api/auth/login`、`GET /api/auth/me`；
+- 前端新增登录/注册页（`components/AuthPanel.tsx`），JWT 经 Authorization 头传递，下载直链和 WebSocket 走 token 查询参数；
+- `AUTH_ENABLED=false` 时退化为单一开发用户，方便本地无登录调试。
+
+**资源按用户隔离**
+
+- `session_dir`、上传暂存目录、输出目录全部按 `user_id` 分层：`output/user_{id}/session_{thread_id}`；
+- 任务表增加 `user_id` 列（含旧库 ALTER TABLE 迁移），任务查询/取消、文件列表/下载都校验归属，跨用户访问一律 404；
+- 知识库支持“用户私有库 + 共享库”分层：`VECTOR_STORE_DIR/user_{id}` 为私有集合，根目录为公开集合，检索时私有优先、互不越界；
+- WebSocket 连接校验 token 与 thread 归属，拒绝跨用户订阅执行事件。
+
+**SQL 防护（工具层硬校验）**
+
+- 新增 `app/tools/sql_guard.py`：仅允许 SELECT/SHOW/WITH/EXPLAIN 开头；词边界匹配拦截 DROP/DELETE/UPDATE/INSERT 等关键字；剥离注释后校验，防注释绕过；拒绝多语句执行；`get_table_data` 的表名过白名单（字母、数字、下划线、中文）；
+- 模型生成危险 SQL 时工具直接返回拒绝原因，不触达数据库。
+
+**上传安全**
+
+- 新增 `app/api/upload_guard.py`：扩展名白名单（可配置）、单文件大小上限（流式写入实时计数，超限即中断并删除半成品）、文件名清洗（剥离目录成分与控制字符，拒绝隐藏文件）；
+- 实现中修复一个真实缺陷：`strip(".")` 会连隐藏文件的前导点一起剥掉，导致 `.env` 类文件绕过检查，已改为只剥离尾部点号。
+
+**接口限流**
+
+- 新增 `app/api/rate_limit.py`：内存滑动窗口限流器；任务提交按用户（默认 10 次/分钟），登录按 IP+用户名（默认 5 次/分钟），超限返回 429 + Retry-After；
+- 多实例部署需换 Redis 共享计数，已列入第二期规划。
+
+### 6. 健壮性与日志
 
 - 修复**无 `TAVILY_API_KEY` 时应用导入即崩溃**的问题：Tavily 客户端改惰性初始化，未配置密钥时仅网络搜索不可用，其他链路正常启动；
 - 修复**未配置 `LLM_QWEN_MAX` 时启动报错含义不明**的问题：模型初始化入口直接校验并给出可操作提示（原实现在 deepagents 组装阶段才抛出 `TypeError`）；
 - 全项目 `print` 日志统一为 `logging` 结构化日志（`app/utils/logging_config.py`），服务启动时统一初始化；
 - 修复文件工具的**路径穿越漏洞**：新增 `resolve_write_path`，模型传入 `../` 或目录外绝对路径时，产物强制收敛回当前会话目录；
+- 修复 **WebSocket 重复 accept** 的协议错误：认证辅助函数不再调用 accept，统一由 ConnectionManager 执行；
 - 任务列表同一秒内提交时排序不稳定，增加 `rowid` 次级排序；
 - 修正 `prompts.py` 模块级遗留的调试 `print`；前端知识库文案同步更新。
 
@@ -412,15 +474,13 @@ uv run ruff format --check app tests  # 格式检查
 
 ## 🚧 能力边界
 
-改造版覆盖了 DeepAgents 多智能体调度、真实工具接入、本地 RAG、文件交付、FastAPI 接口、WebSocket 实时推送、会话持久化、任务管理和前后端联调，并具备基础测试与 CI。
+改造版覆盖了 DeepAgents 多智能体调度、真实工具接入、本地 RAG、文件交付、FastAPI 接口、WebSocket 实时推送、会话持久化、任务管理、JWT 用户体系与按用户资源隔离、SQL/上传安全校验和接口限流，并具备 159 个测试与 CI。
 
-以下生产治理能力仍未展开，适合在主链路跑通之后继续扩展：
+以下生产治理能力仍未展开，适合作为后续迭代方向：
 
-- 用户登录、角色权限和多租户隔离；
-- 文件上传安全扫描和内容审核；
-- 分布式任务队列（当前为单进程 asyncio 后台任务）和大规模并发治理；
+- 角色权限细分（当前是“本人 or 拒绝”的粗粒度模型）和内容审核；
+- 分布式任务队列（当前为单进程 asyncio 后台任务，重启后运行中任务丢失）和大规模并发治理；
+- 检查点与限流的实例间共享（当前 SQLite/内存实现仅适合单机，多实例需 PostgreSQL + Redis）；
 - 全量事件持久化、历史会话浏览和审计追踪；
 - 系统化评测集、自动化回归和 Agent 质量评估；
 - 生产监控、告警、链路追踪和灰度发布。
-
-这些能力适合作为后续迭代方向，也可以在求职材料中说明为"已识别的下一步规划"。

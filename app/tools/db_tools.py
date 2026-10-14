@@ -4,6 +4,9 @@ MySQL 数据库查询工具模块
 封装数据库查询助手使用的三个 LangChain 工具：
 list_sql_tables 用于发现真实表名，get_table_data 用于预览字段和样例数据，
 execute_sql_query 用于在确认结构后执行自定义查询。
+
+安全说明：模型生成的 SQL 在工具层经过 sql_guard 硬校验
+（只读语句 + 关键字黑名单 + 单语句 + 表名白名单），不依赖提示词约束。
 """
 
 import os
@@ -13,8 +16,12 @@ from langchain_core.tools import tool
 from mysql.connector import Error, connect
 
 from app.api.monitor import monitor
+from app.tools.sql_guard import validate_readonly_sql, validate_table_name
+from app.utils.logging_config import get_logger
 
 load_dotenv()
+
+logger = get_logger(__name__)
 
 
 # 集中读取数据库配置，后续三个工具都复用这份连接参数
@@ -119,6 +126,11 @@ def get_table_data(table_name) -> str:
         args={"table_name": table_name},
     )
 
+    # 工具层安全校验：表名进入 SQL 拼接前必须过白名单，杜绝注入
+    invalid_reason = validate_table_name(table_name)
+    if invalid_reason:
+        return invalid_reason
+
     # 获取数据库参数
     config = get_db_config()
 
@@ -126,8 +138,8 @@ def get_table_data(table_name) -> str:
     try:
         with connect(**config) as conn:
             with conn.cursor() as cursor:
-                # 教程代码直接拼接表名，重点演示 Agent 查询链路；生产环境应改为白名单校验
-                sql = f"SELECT * FROM {table_name} LIMIT 100"
+                # 表名已通过白名单校验（仅字母、数字、下划线、中文），拼接安全
+                sql = f"SELECT * FROM {table_name.strip().strip('`')} LIMIT 100"
                 cursor.execute(sql)
 
                 # cursor.description 保存查询结果的列元信息
@@ -180,6 +192,12 @@ def execute_sql_query(query) -> str:
     # 埋点：记录模型最终生成的 SQL，便于教学时观察是否真的落到了正确表字段上
     monitor.report_tool(tool_name="数据库表数据查询工具：execute_sql_query", args={"query": query})
 
+    # 工具层安全校验：只读策略在工具内硬执行，不依赖提示词约束模型
+    invalid_reason = validate_readonly_sql(query)
+    if invalid_reason:
+        logger.warning("SQL 安全校验拒绝: %s", invalid_reason)
+        return invalid_reason
+
     # 获取数据库参数
     config = get_db_config()
 
@@ -188,7 +206,7 @@ def execute_sql_query(query) -> str:
     try:
         with connect(**config) as conn:
             with conn.cursor() as cursor:
-                # 当前章节依赖提示词约束模型生成只读查询；生产环境建议在工具层限制 SELECT/SHOW
+                # 已通过只读校验（SELECT/SHOW/WITH 开头、无 DDL/DML 关键字、单语句）
                 cursor.execute(query)
 
                 # 非查询类 SQL 没有结果集描述，这里统一返回提示，避免工具调用直接抛错给模型

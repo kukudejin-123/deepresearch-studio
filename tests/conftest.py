@@ -3,6 +3,9 @@ pytest 全局配置与共享 fixture
 
 在任何 app 模块被导入前设置测试环境变量，保证测试不依赖真实 API Key、
 MySQL、Tavily 等外部服务；LLM 相关测试统一使用惰性初始化的假配置。
+
+安全相关测试的默认姿态与生产一致：AUTH_ENABLED=true，
+所有资源接口都需要 JWT；用户数据库落在临时目录，测试间互不影响。
 """
 
 import os
@@ -28,6 +31,13 @@ os.environ.setdefault(
     "CHECKPOINTER_DB",
     str(Path(tempfile.gettempdir()) / "deepresearch_studio_test" / "checkpoints.db"),
 )
+# 认证默认开启（与生产一致）；测试 JWT 使用固定长密钥，避免依赖环境
+os.environ.setdefault("AUTH_ENABLED", "true")
+os.environ.setdefault("JWT_SECRET", "test-secret-key-for-pytest-only-32-bytes-long")
+os.environ.setdefault(
+    "AUTH_DB",
+    str(Path(tempfile.gettempdir()) / "deepresearch_studio_test" / "users.db"),
+)
 
 
 @pytest.fixture
@@ -42,6 +52,7 @@ def session_dir(tmp_path):
         reset_session_context,
         set_session_context,
         set_thread_context,
+        set_user_context,
     )
 
     directory = tmp_path / "session_test"
@@ -49,8 +60,9 @@ def session_dir(tmp_path):
 
     dir_token = set_session_context(str(directory))
     thread_token = set_thread_context("test-thread-id")
+    user_token = set_user_context(None)
     yield directory
-    reset_session_context(dir_token, thread_token)
+    reset_session_context(dir_token, thread_token, user_token)
 
 
 @pytest.fixture
@@ -71,6 +83,54 @@ def reset_checkpointer():
             asyncio.run(checkpointer_module.close_checkpointer())
         except RuntimeError:
             pass
+
+
+def _register_and_login(client, username: str, password: str = "secret123") -> str:
+    """注册用户并返回 JWT（内部辅助）"""
+    response = client.post("/api/auth/register", json={"username": username, "password": password})
+    assert response.status_code == 201, response.text
+    return response.json()["token"]
+
+
+@pytest.fixture
+def auth_client():
+    """
+    带登录态的 TestClient
+
+    自动注册一个唯一用户并把 JWT 写入客户端默认请求头，
+    模拟“已登录用户”访问所有资源接口。
+    """
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from app.api.server import app
+
+    with TestClient(app) as client:
+        username = f"alice_{uuid.uuid4().hex[:8]}"
+        token = _register_and_login(client, username)
+        client.headers["Authorization"] = f"Bearer {token}"
+        yield client
+
+
+@pytest.fixture
+def second_auth_client():
+    """
+    另一个登录用户的 TestClient
+
+    用于跨用户资源隔离测试：第二个用户访问第一个用户的任务/文件应被拒绝。
+    """
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from app.api.server import app
+
+    with TestClient(app) as client:
+        username = f"bob_{uuid.uuid4().hex[:8]}"
+        token = _register_and_login(client, username)
+        client.headers["Authorization"] = f"Bearer {token}"
+        yield client
 
 
 @pytest.fixture(autouse=True)

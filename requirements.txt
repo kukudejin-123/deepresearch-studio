@@ -36,6 +36,9 @@ reportlab>=4.0.0            # 跨平台 PDF 生成，用于 word_converter.py
 tavily-python==0.7.24       # 联网搜索 API
 requests>=2.31.0            # HTTP 请求库
 
+# --- 用户认证 (Auth) ---
+pyjwt>=2.8.0                  # JWT 签发与校验
+
 # --- 基础工具 (Utilities) ---
 PyYAML>=6.0                 # YAML 配置文件解析，用于 prompts.py
 pydantic>=2.0.0             # 数据校验
