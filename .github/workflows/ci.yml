@@ -9,6 +9,17 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    # arq 队列测试需要 Redis（本地探测可达时才运行，CI 中由 service 提供）
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4

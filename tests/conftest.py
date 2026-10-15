@@ -38,6 +38,13 @@ os.environ.setdefault(
     "AUTH_DB",
     str(Path(tempfile.gettempdir()) / "deepresearch_studio_test" / "users.db"),
 )
+# 事件库同样落到临时目录，避免测试污染项目目录
+os.environ.setdefault(
+    "EVENT_DB",
+    str(Path(tempfile.gettempdir()) / "deepresearch_studio_test" / "events.db"),
+)
+# 默认使用进程内队列；arq 相关用例自行切到 arq 并探测 Redis
+os.environ.setdefault("TASK_QUEUE", "memory")
 
 
 @pytest.fixture

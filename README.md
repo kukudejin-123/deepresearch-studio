@@ -90,8 +90,17 @@
 - **工程化前后端结构清晰**
   - 基于 `FastAPI + WebSocket + DeepAgents + React` 组织任务接口、异步执行、事件推送、文件上传和文件下载。
 - **测试与 CI 全覆盖**
-  - 159 个 pytest 用例覆盖路径解析与写入边界、文件工具、数据库工具（mock）、向量库全链路（FakeEmbeddings）、检查点、任务存储、认证与资源隔离、API/WebSocket、智能体组装；
-  - GitHub Actions 流水线：ruff lint + ruff format + pytest。
+  - 184 个 pytest 用例覆盖路径解析与写入边界、文件工具、数据库工具（mock）、向量库全链路（FakeEmbeddings）、检查点、任务存储、认证与资源隔离、上传与限流、事件回放、队列与指标、API/WebSocket、智能体组装；
+  - GitHub Actions 流水线：ruff lint + ruff format + pytest（CI 含 Redis 服务，arq 队列用例真实运行）。
+- **分布式任务队列与断线续传（第二期可靠执行）**
+  - 任务队列抽象：`memory`（进程内，默认）/ `arq`（Redis 分布式）双实现，环境变量一行切换；
+  - arq 模式下 Agent 执行在独立 worker 进程完成，API 重启不丢已入队任务，支持多 worker 水平扩展；
+  - 执行事件全量落库（EventStore），WebSocket 断线/页面刷新后按 seq 增量回放，实时事件与回放事件自动去重；
+  - worker 与 API 进程间的事件经 Redis Pub/Sub 桥实时转发；
+  - 取消支持协作式：跨进程把状态置为 cancelled，执行侧定期检查主动收尾。
+- **可观测性（第二期）**
+  - Prometheus 指标端点 `/metrics`：任务计数（按状态）、活跃任务数、工具调用、接口请求、任务耗时分布；
+  - 全链路结构化日志；Langfuse/OpenTelemetry 接入点已预留（见改造说明）。
 - **多用户体系与资源隔离（第一期安全改造）**
   - 注册 / 登录 + JWT 认证，除认证接口外的所有资源接口默认要求登录；
   - 任务、上传文件、输出目录、私有知识库全部按 `user_id` 隔离，接口层校验资源归属，跨用户访问一律按 404 拒绝；
@@ -151,7 +160,9 @@
 | 实时通信       | `WebSocket`                                      | 推送工具调用、助手调用、最终结果和错误事件                                    |
 | 用户认证       | `PyJWT` / `pbkdf2-hmac`                          | 注册登录、JWT 签发校验、密码哈希存储                                          |
 | 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 提供登录注册、对话式研搜界面、事件流、附件上传和文件下载                      |
-| 测试与 CI      | `pytest` / `ruff` / `GitHub Actions`             | 单元与接口测试、代码规范检查、持续集成                                        |
+| 任务队列       | `arq` / `Redis`                                  | 分布式任务队列（TASK_QUEUE=arq），执行进程与接口进程隔离                     |
+| 测试与 CI      | `pytest` / `ruff` / `GitHub Actions`             | 单元与接口测试、代码规范检查、持续集成（CI 含 Redis 服务）                   |
+| 可观测性       | `prometheus-client`                              | `/metrics` 指标端点：任务、工具调用、接口请求与耗时分布                      |
 | 依赖管理       | `uv` / `pnpm`                                    | 管理 Python 后端和前端依赖                                                    |
 
 ## 📁 项目结构
@@ -166,13 +177,21 @@ deepresearch-studio/
 │   │   ├── main_agent.py           # 主智能体组装与 run_deep_agent 执行入口
 │   │   └── prompts.py              # 读取 app/prompt/prompts.yml
 │   ├── api/
-│   │   ├── auth.py                 # 用户存储、JWT 认证、登录依赖（新增）
+│   │   ├── auth.py                 # 用户存储、JWT 认证、登录依赖
 │   │   ├── context.py              # ContextVar 保存 thread_id、session_dir 和 user_id
-│   │   ├── monitor.py              # 工具调用、助手调用、结果和异常事件推送
-│   │   ├── rate_limit.py           # 滑动窗口限流器（新增）
+│   │   ├── metrics.py              # Prometheus 指标定义与中间件（第二期新增）
+│   │   ├── monitor.py              # 事件多路分发：WebSocket / Redis 桥 / 落库
+│   │   ├── rate_limit.py           # 滑动窗口限流器
 │   │   ├── server.py               # FastAPI 全部接口
 │   │   ├── task_store.py           # SQLite 任务生命周期存储（含归属用户）
-│   │   └── upload_guard.py         # 上传文件校验与清洗（新增）
+│   │   └── upload_guard.py         # 上传文件校验与清洗
+│   ├── events/                     # 执行事件持久化与跨进程分发（第二期新增）
+│   │   ├── bridge.py               # Redis Pub/Sub 事件桥（worker -> API -> WebSocket）
+│   │   └── store.py                # SQLite 事件存储（断线回放）
+│   ├── queue/                      # 任务队列抽象（第二期新增）
+│   │   ├── arq_queue.py            # Redis + arq 分布式队列
+│   │   ├── base.py                 # TaskQueue 协议与提交结果
+│   │   └── memory_queue.py         # 进程内 asyncio 队列（默认）
 │   ├── prompt/
 │   │   └── prompts.yml             # 主智能体和子智能体提示词配置
 │   ├── rag/                        # 本地向量知识库（替代原 ragflow 目录）
@@ -180,7 +199,9 @@ deepresearch-studio/
 │   │   ├── ingest.py               # 文档入库脚本：docs/knowledge_base -> FAISS
 │   │   └── vector_store.py         # FAISS 集合管理与检索
 │   ├── tools/                      # Tavily、MySQL、向量库、文件读取、Markdown、PDF 工具
-│   │   └── sql_guard.py            # SQL 只读校验与表名白名单（新增）
+│   │   └── sql_guard.py            # SQL 只读校验与表名白名单
+│   ├── worker/                     # arq worker 进程入口（第二期新增）
+│   │   └── tasks.py                # WorkerSettings 与 run_agent_task
 │   ├── utils/                      # 路径解析、日志配置、Markdown/PDF 底层转换
 │   ├── data/                       # 运行时生成：向量库索引、检查点与用户数据库（git 忽略）
 │   ├── output/                     # 运行时生成：按用户/会话隔离的 Markdown、PDF 等产物
@@ -298,25 +319,40 @@ uv run python -m app.rag.ingest --collection 金融行业
 
 ### 7. 启动后端
 
+默认（memory 队列，任务在 API 进程内执行）：
+
 ```bash
 uv run uvicorn app.api.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+arq 分布式模式（`.env` 中设置 `TASK_QUEUE=arq`，需先启动 Redis），
+执行进程与接口进程分离：
+
+```bash
+# 终端 1：启动 worker（可多开几个实现水平扩展）
+uv run arq app.worker.tasks.WorkerSettings
+
+# 终端 2：启动 API
+uv run uvicorn app.api.server:app --host 0.0.0.0 --port 8000
+```
+
 后端默认接口：
 
-| 接口                                | 说明                                         |
-| ----------------------------------- | -------------------------------------------- |
-| `POST /api/auth/register`           | 注册新用户并直接返回 JWT（新增）             |
-| `POST /api/auth/login`              | 登录并签发 JWT（新增）                       |
-| `GET /api/auth/me`                  | 查询当前登录用户（新增）                     |
-| `POST /api/task`                    | 启动一次 DeepAgents 后台任务（需登录、限流） |
-| `POST /api/task/{thread_id}/cancel` | 取消指定会话任务（校验归属）                 |
-| `GET /api/tasks`                    | 查询本人最近任务列表及状态                   |
-| `GET /api/task/{thread_id}`         | 查询本人单个任务状态详情                     |
-| `POST /api/upload`                  | 上传文件到本人会话目录（类型/大小校验）      |
-| `GET /api/files`                    | 列出本人输出目录中的生成文件                 |
-| `GET /api/download`                 | 下载本人输出目录中的文件                     |
-| `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、结果和异常事件       |
+| 接口                                | 说明                                             |
+| ----------------------------------- | ------------------------------------------------ |
+| `POST /api/auth/register`           | 注册新用户并直接返回 JWT                         |
+| `POST /api/auth/login`              | 登录并签发 JWT                                   |
+| `GET /api/auth/me`                  | 查询当前登录用户                                 |
+| `POST /api/task`                    | 提交任务到队列（需登录、限流，memory/arq 可切） |
+| `POST /api/task/{thread_id}/cancel` | 取消任务（队列中即中止，运行中协作式收尾）       |
+| `GET /api/tasks`                    | 查询本人最近任务列表及状态                       |
+| `GET /api/task/{thread_id}`         | 查询本人单个任务状态详情                         |
+| `GET /api/task/{thread_id}/events`  | 回放任务执行事件（after_seq 增量，第二期新增）   |
+| `POST /api/upload`                  | 上传文件到本人会话目录（类型/大小校验）          |
+| `GET /api/files`                    | 列出本人输出目录中的生成文件                     |
+| `GET /api/download`                 | 下载本人输出目录中的文件                         |
+| `GET /metrics`                      | Prometheus 指标（第二期新增）                    |
+| `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、结果和异常事件           |
 
 除注册/登录外的接口都需要 JWT 认证：HTTP 接口走 `Authorization: Bearer <token>`
 请求头；浏览器 `<a href>` 直链下载额外支持 `?token=` 查询参数；
@@ -438,7 +474,54 @@ uv run ruff format --check app tests  # 格式检查
 - 新增 `app/api/rate_limit.py`：内存滑动窗口限流器；任务提交按用户（默认 10 次/分钟），登录按 IP+用户名（默认 5 次/分钟），超限返回 429 + Retry-After；
 - 多实例部署需换 Redis 共享计数，已列入第二期规划。
 
-### 6. 健壮性与日志
+### 6. 第二期：可靠执行与可观测性
+
+**任务队列抽象（memory / arq 双实现）**
+
+- 新增 `app/queue/`：`base.py` 定义 TaskQueue 协议，`memory_queue.py` 保留原进程内
+  asyncio 行为（默认），`arq_queue.py` 基于 Redis + arq 实现分布式队列；
+- 新增 `app/worker/tasks.py`：独立 worker 进程入口（`uv run arq app.worker.tasks.WorkerSettings`），
+  任务超时 30 分钟、失败重试 1 次、并发 4 个；
+- 提交接口改为队列化：arq 模式下入队失败返回 503 并把任务标记 failed，不会留下
+  "running 僵尸任务"；`thread_id` 直接作为 arq job_id，任务记录与队列任务天然对应。
+
+**跨进程事件桥与事件持久化**
+
+- 新增 `app/events/store.py`：执行事件按 `thread_id + seq` 落库（SQLite WAL 模式，
+  支持 API 与 worker 多进程并发写）；
+- 新增 `app/events/bridge.py`：Redis Pub/Sub 桥——worker 进程产生的事件发布到
+  `deepresearch:events:{thread_id}`，API 进程订阅后转发给 WebSocket；
+  订阅范围随 WebSocket 连接动态伸缩，零订阅时不读消息（避免 redis-py 抛
+  "pubsub connection not set" 中断循环）；
+- 新增接口 `GET /api/task/{thread_id}/events`：断线重连/页面刷新后按 `after_seq`
+  增量回放；monitor 事件负载携带 `seq`，前端对"回放事件"与"实时事件"自动去重；
+- 前端 `useDeepAgentSession` 在连接建立后自动回放缺口事件。
+
+**协作式取消**
+
+- arq 模式下运行中的任务无法跨进程强杀：取消接口把状态置为 cancelled，
+  `run_deep_agent` 在流式循环中定期检查并主动收尾，两种队列模式语义一致；
+- 修复 arq `Job.abort()` **默认无限等待 worker 确认**的坑：无 worker 消费时会把
+  HTTP 取消请求永久挂死，现改为显式 2 秒超时（中止信号在等待前已写入 Redis，
+  超时仅表示无人确认）。
+
+**可观测性**
+
+- 新增 `app/api/metrics.py`：Prometheus 指标（任务计数按状态、活跃任务数、
+  工具调用、接口请求按路由模板、任务耗时直方图）+ 请求计数中间件；
+- 新增 `GET /metrics` 端点；任务级指标在 `run_deep_agent` 结局处记录
+  （memory 模式下提交与结局同进程，数据完整；arq 模式下分处两个进程，
+  生产环境需两个进程都接入 Prometheus，README 已说明）；
+- Langfuse/OpenTelemetry 接入点：所有 LLM 调用与工具调用均经 monitor 埋点，
+  事件结构可直接映射到 trace span，接入时只需增加一个 sink。
+
+**检查点 PostgreSQL 分支**
+
+- `app/agent/checkpointer.py` 支持 `CHECKPOINTER_TYPE=postgres`：
+  AsyncPostgresSaver 连接 PostgreSQL，多 worker 共享会话状态；
+  依赖做成可选 extra（`uv sync --extra postgres`），默认 sqlite 模式不受影响。
+
+### 7. 健壮性与日志
 
 - 修复**无 `TAVILY_API_KEY` 时应用导入即崩溃**的问题：Tavily 客户端改惰性初始化，未配置密钥时仅网络搜索不可用，其他链路正常启动；
 - 修复**未配置 `LLM_QWEN_MAX` 时启动报错含义不明**的问题：模型初始化入口直接校验并给出可操作提示（原实现在 deepagents 组装阶段才抛出 `TypeError`）；
@@ -446,7 +529,13 @@ uv run ruff format --check app tests  # 格式检查
 - 修复文件工具的**路径穿越漏洞**：新增 `resolve_write_path`，模型传入 `../` 或目录外绝对路径时，产物强制收敛回当前会话目录；
 - 修复 **WebSocket 重复 accept** 的协议错误：认证辅助函数不再调用 accept，统一由 ConnectionManager 执行；
 - 任务列表同一秒内提交时排序不稳定，增加 `rowid` 次级排序；
-- 修正 `prompts.py` 模块级遗留的调试 `print`；前端知识库文案同步更新。
+- 修正 `prompts.py` 模块级遗留的调试 `print`；前端知识库文案同步更新；
+- 修复 **WebSocket 归属校验过严**的问题：客户端"先建连、后提交"的正常流程被
+  403 挡死，改为"任务不存在时允许预订阅（thread_id 为 UUID 且按用户本地存储），
+  任务属于他人时拒绝"；
+- 修复 **Redis 订阅循环零订阅崩溃**：API 启动后、首个 WebSocket 建立前
+  调用 `get_message` 会抛 "pubsub connection not set" 并中断整个桥接循环，
+  改为零订阅时跳过读取。
 
 ## 📚 配套教程目录
 
@@ -474,13 +563,14 @@ uv run ruff format --check app tests  # 格式检查
 
 ## 🚧 能力边界
 
-改造版覆盖了 DeepAgents 多智能体调度、真实工具接入、本地 RAG、文件交付、FastAPI 接口、WebSocket 实时推送、会话持久化、任务管理、JWT 用户体系与按用户资源隔离、SQL/上传安全校验和接口限流，并具备 159 个测试与 CI。
+改造版覆盖了 DeepAgents 多智能体调度、真实工具接入、本地 RAG、文件交付、FastAPI 接口、WebSocket 实时推送、SQLite/PostgreSQL 会话持久化、任务生命周期管理、JWT 用户体系与按用户资源隔离、SQL/上传安全校验、接口限流、memory/arq 双模式任务队列、事件持久化与断线回放、Prometheus 指标，并具备 184 个测试与 CI。
 
 以下生产治理能力仍未展开，适合作为后续迭代方向：
 
-- 角色权限细分（当前是“本人 or 拒绝”的粗粒度模型）和内容审核；
-- 分布式任务队列（当前为单进程 asyncio 后台任务，重启后运行中任务丢失）和大规模并发治理；
-- 检查点与限流的实例间共享（当前 SQLite/内存实现仅适合单机，多实例需 PostgreSQL + Redis）；
-- 全量事件持久化、历史会话浏览和审计追踪；
+- 角色权限细分（当前是“本人 or 拒绝”的粗粒度模型）和文件内容审核；
+- 运行中任务的断点续跑（当前取消即终止，检查点已具备恢复条件但未实现 resume）；
+- 多实例部署的细节：检查点/限流/事件库默认仍是单机 SQLite，arq 模式下需切
+  PostgreSQL + Redis 共享（代码路径已就绪）；
+- 全量事件的历史会话浏览界面与审计追踪；
 - 系统化评测集、自动化回归和 Agent 质量评估；
-- 生产监控、告警、链路追踪和灰度发布。
+- 日志聚合、告警规则与链路追踪平台接入（埋点已预留）。

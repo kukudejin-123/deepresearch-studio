@@ -2,6 +2,7 @@ import { API_BASE_URL } from "./config";
 import { authFetch, getToken } from "./auth";
 import type {
   CancelTaskResponse,
+  EventReplayResponse,
   FileListResponse,
   TaskResponse,
   UploadResponse
@@ -64,4 +65,14 @@ export function getDownloadUrl(path: string): string {
     url.searchParams.set("token", token);
   }
   return url.toString();
+}
+
+/** 拉取任务的历史执行事件（断线重连/页面刷新后回放） */
+export async function fetchTaskEvents(
+  threadId: string,
+  afterSeq = 0
+): Promise<EventReplayResponse> {
+  const url = new URL(apiUrl(`/api/task/${encodeURIComponent(threadId)}/events`));
+  url.searchParams.set("after_seq", String(afterSeq));
+  return authFetch<EventReplayResponse>(url.toString());
 }

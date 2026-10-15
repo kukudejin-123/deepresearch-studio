@@ -45,7 +45,14 @@ class ToolMonitor:
         data: Optional[dict[str, Any]] = None,
     ) -> None:
         """
-        构造统一监控事件，并尝试推送到当前 thread_id 对应的前端连接
+        构造统一监控事件，并按当前进程角色分发
+
+        分发策略（第二期改造）：
+        1. 事件落库（EventStore）：断线重连/页面刷新后按 seq 回放；
+        2. Redis 事件桥：任务在 arq worker 进程执行时，事件经 pub/sub
+           送到 API 进程，再推给 WebSocket；
+        3. 进程内 WebSocket 管理器：单机 memory 队列模式下直接推送；
+        4. 日志保底输出。
 
         :param event_type: 事件类型，例如 tool_start、assistant_call
         :param message: 面向前端展示的事件说明
@@ -59,9 +66,21 @@ class ToolMonitor:
             "timestamp": datetime.datetime.now().isoformat(),
         }
 
+        thread_id = get_thread_context()
+
+        # 1. 持久化：先落库再分发，保证回放数据不依赖实时推送是否成功；
+        #    返回的 seq 写入 payload，前端据此对“回放事件”和“实时事件”去重
+        seq = self._persist_event(thread_id, event_type, message, payload["data"])
+        if seq is not None:
+            payload["seq"] = seq
+
+        # 2. 跨进程桥：worker 进程没有 WebSocket 管理器，事件走 Redis
+        if self.websocket_manager is None:
+            self._publish_to_bridge(thread_id, payload)
+
+        # 3. 进程内 WebSocket 推送（API 进程或单机模式）
         if self.websocket_manager:
             try:
-                thread_id = get_thread_context()
                 manager_loop = self.websocket_manager.loop
 
                 if manager_loop and thread_id:
@@ -78,6 +97,55 @@ class ToolMonitor:
 
         # 日志保底输出，便于无前端场景下观察执行过程
         logger.info("[Monitor:%s] %s", event_type, message)
+
+        # 工具调用指标（第二期可观测性）：失败不影响主流程
+        if event_type == "tool_start":
+            try:
+                from app.api.metrics import record_tool_call
+
+                record_tool_call(str((data or {}).get("tool_name", "unknown")))
+            except Exception:
+                pass
+
+    def _persist_event(
+        self,
+        thread_id: Optional[str],
+        event_type: str,
+        message: str,
+        data: dict[str, Any],
+    ) -> Optional[int]:
+        """
+        事件落库；无 thread_id（脚本调试）时跳过
+
+        :return: 事件 seq；落库失败或跳过时返回 None
+        """
+        if thread_id is None:
+            return None
+        try:
+            from app.events import get_event_store
+
+            return get_event_store().append(thread_id, event_type, message, data)
+        except Exception as e:
+            # 落库失败不影响主流程（实时推送与日志仍可用）
+            logger.warning("事件落库失败: %s", e)
+            return None
+
+    def _publish_to_bridge(self, thread_id: Optional[str], payload: dict[str, Any]) -> None:
+        """把事件发布到 Redis 桥（仅在配置了 Redis 且无进程内 WS 管理器时）"""
+        if thread_id is None:
+            return
+        try:
+            from app.events import get_event_bridge
+
+            bridge = get_event_bridge()
+            if bridge is not None:
+                # fire-and-forget：发布失败已由桥内部降级为日志
+                asyncio.get_running_loop().create_task(bridge.publish(thread_id, payload))
+        except RuntimeError:
+            # 没有运行中的事件循环（同步脚本场景），跳过跨进程桥
+            pass
+        except Exception as e:
+            logger.warning("事件桥发布失败: %s", e)
 
     def _send_to_websocket(
         self,

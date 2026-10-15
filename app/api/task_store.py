@@ -51,12 +51,16 @@ class TaskStore:
 
     def _connect(self) -> sqlite3.Connection:
         # 每次操作独立连接：任务写入频率低，避免长连接在 Windows 下的文件锁问题
-        conn = sqlite3.connect(str(self.db_path))
+        # timeout + WAL：API 进程与 arq worker 进程并发写同一文件
+        conn = sqlite3.connect(str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_table(self) -> None:
         with self._connect() as conn:
+            # WAL 模式支持多进程读写并发，busy_timeout 避免瞬时写锁直接报错
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
             conn.execute(_CREATE_TABLE_SQL)
             self._migrate_user_id(conn)
 

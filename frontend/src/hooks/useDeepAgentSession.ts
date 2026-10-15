@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cancelTask, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import {
+  cancelTask,
+  fetchTaskEvents,
+  listSessionFiles,
+  startTask,
+  uploadSessionFiles
+} from "../lib/api";
 import { getToken } from "../lib/auth";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
@@ -23,6 +29,9 @@ export function useDeepAgentSession() {
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const heartbeatTimerRef = useRef<number | undefined>(undefined);
   const uploadedNameSetRef = useRef<Set<string>>(new Set());
+  // 已收到的最大事件 seq（回放与实时推送去重）；thread 切换时重置
+  const lastSeqRef = useRef(0);
+  const lastThreadRef = useRef<string | null>(null);
   const [threadId, setThreadId] = useState(getStoredThreadId);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [events, setEvents] = useState<MonitorMessage[]>([]);
@@ -46,6 +55,29 @@ export function useDeepAgentSession() {
       heartbeatTimerRef.current = undefined;
     }
   }, []);
+
+  // 回放 lastSeqRef 之后的事件（断线期间丢失的执行过程）
+  const replayMissedEvents = useCallback(async () => {
+    try {
+      const response = await fetchTaskEvents(threadId, lastSeqRef.current);
+      const missed = response.events.filter((event) => event.seq > lastSeqRef.current);
+      if (missed.length === 0) {
+        return;
+      }
+      lastSeqRef.current = Math.max(...missed.map((event) => event.seq));
+      const replayed: MonitorMessage[] = missed.map((event) => ({
+        type: "monitor_event",
+        event: event.event,
+        message: event.message,
+        data: event.data,
+        timestamp: event.timestamp,
+        seq: event.seq
+      }));
+      setEvents((previous) => [...previous, ...replayed].slice(-MAX_EVENTS));
+    } catch {
+      // 回放失败不打断实时推送（任务可能刚开始、还没有事件）
+    }
+  }, [threadId]);
 
   const resetSession = useCallback(() => {
     const nextThreadId = createThreadId();
@@ -83,6 +115,13 @@ export function useDeepAgentSession() {
       socketRef.current?.close();
       setConnectionState(hadSocket ? "reconnecting" : "connecting");
 
+      // 切换到新 thread（新建会话）时从头开始计数；
+      // 同一 thread 重连时保留 lastSeqRef，只回放缺口
+      if (lastThreadRef.current !== threadId) {
+        lastThreadRef.current = threadId;
+        lastSeqRef.current = 0;
+      }
+
       // 浏览器 WebSocket 不支持自定义请求头，JWT 通过 query 参数传递
       const token = getToken();
       const wsUrl = `${WS_BASE_URL}/ws/${encodeURIComponent(threadId)}${
@@ -97,6 +136,8 @@ export function useDeepAgentSession() {
         }
         setConnectionState("connected");
         setLastError("");
+        // 断线重连或页面刷新后，先按 seq 回放缺口事件，再继续实时推送
+        void replayMissedEvents();
         heartbeatTimerRef.current = window.setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
             socket.send("ping");
@@ -117,6 +158,14 @@ export function useDeepAgentSession() {
 
           if (payload.type !== "monitor_event") {
             return;
+          }
+
+          // 实时事件按 seq 去重：已经回放过的事件直接跳过
+          if (typeof payload.seq === "number") {
+            if (payload.seq <= lastSeqRef.current) {
+              return;
+            }
+            lastSeqRef.current = payload.seq;
           }
 
           setEvents((previous) => [...previous, payload].slice(-MAX_EVENTS));

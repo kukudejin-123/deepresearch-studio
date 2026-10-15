@@ -15,6 +15,21 @@ export interface MonitorMessage {
   message: string;
   data: Record<string, unknown>;
   timestamp: string;
+  /** 事件序号（服务端 EventStore 分配），用于回放与实时推送去重 */
+  seq?: number;
+}
+
+export interface ReplayedEvent {
+  seq: number;
+  event: MonitorEventName;
+  message: string;
+  data: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface EventReplayResponse {
+  events: ReplayedEvent[];
+  last_seq: number;
 }
 
 export interface PongMessage {
@@ -27,6 +42,7 @@ export type SocketMessage = MonitorMessage | PongMessage;
 export interface TaskResponse {
   status: "started" | string;
   thread_id: string;
+  queue?: string;
 }
 
 export interface CancelTaskResponse {

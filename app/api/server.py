@@ -35,12 +35,12 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 from app.agent.checkpointer import close_checkpointer, get_checkpointer
-from app.agent.main_agent import run_deep_agent, task_store
+from app.agent.main_agent import task_store
 from app.api.auth import (
     DEV_USER,
     auth_enabled,
@@ -51,14 +51,23 @@ from app.api.auth import (
     get_user_store,
     validate_registration,
 )
+from app.api.metrics import (
+    MetricsMiddleware,
+    record_task_cancelled,
+    record_task_submitted,
+    render_metrics,
+)
 from app.api.monitor import manager
 from app.api.rate_limit import login_rate_limiter, task_rate_limiter
+from app.api.task_store import STATUS_CANCELLED, STATUS_FAILED
 from app.api.upload_guard import (
     UploadTooLargeError,
     get_max_upload_bytes,
     sanitize_filename,
     validate_upload,
 )
+from app.events import get_event_store
+from app.queue import get_task_queue
 from app.utils.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -72,21 +81,65 @@ async def lifespan(_app: FastAPI):
     """
     服务生命周期入口。
 
-    启动时：初始化日志、绑定事件循环到 WebSocket 管理器、预热 SQLite 检查点表；
-    停机时：关闭检查点数据库连接。
+    启动时：初始化日志、绑定事件循环到 WebSocket 管理器、预热检查点表、
+    启动 Redis 事件桥订阅（arq 队列模式下把 worker 的事件转发给 WebSocket）；
+    停机时：关闭事件桥与检查点连接。
     """
     setup_logging("INFO")
     loop = asyncio.get_running_loop()
     manager.set_loop(loop)
     # 预热检查点：启动即建表，避免首个任务请求时才感知数据库问题
     await get_checkpointer()
+    # 预热事件存储与任务队列，让启动日志暴露配置问题
+    get_event_store()
+    queue = get_task_queue()
+    _start_event_bridge()
     logger.info(
-        "DeepResearch Studio 服务启动完成（认证%s）",
+        "DeepResearch Studio 服务启动完成（认证%s，队列 %s）",
         "已启用" if auth_enabled() else "未启用，开发模式",
+        queue.queue_type,
     )
     yield
+    await _stop_event_bridge()
     await close_checkpointer()
     logger.info("DeepResearch Studio 服务已停机")
+
+
+def _start_event_bridge() -> None:
+    """
+    启动 Redis 事件桥订阅（仅 arq 模式）
+
+    订阅活跃 thread 的频道，把 worker 进程产生的 monitor 事件转发给
+    本进程的 WebSocket 连接；memory 模式下无需跨进程桥。
+    """
+    from app.events import get_event_bridge
+
+    bridge = get_event_bridge()
+    if bridge is None:
+        return
+
+    async def handle_event(thread_id: str, payload: dict) -> None:
+        websocket = manager.active_connections.get(thread_id)
+        if websocket is not None:
+            try:
+                await websocket.send_json(payload)
+            except Exception as e:
+                logger.warning("事件桥转发失败: thread_id=%s, error=%s", thread_id, e)
+
+    # 订阅范围动态取自 WebSocket 连接注册表：有客户端连接的 thread 才订阅
+    bridge.start_subscriber(
+        thread_ids_provider=lambda: list(manager.active_connections.keys()),
+        handler=handle_event,
+    )
+
+
+async def _stop_event_bridge() -> None:
+    """关闭 Redis 事件桥"""
+    from app.events import get_event_bridge
+
+    bridge = get_event_bridge()
+    if bridge is not None:
+        await bridge.close()
 
 
 # 当前文件位于 app/api/server.py，运行时目录统一收敛到 app 目录
@@ -95,8 +148,8 @@ project_root = current_dir.parent
 
 app = FastAPI(title="DeepResearch Studio API", lifespan=lifespan)
 
-# 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
-active_tasks: dict[str, asyncio.Task] = {}
+# 接口指标中间件（第二期可观测性）
+app.add_middleware(MetricsMiddleware)
 
 # output 保存每个会话最终工作区，前端只允许从这里浏览和下载生成文件
 output_dir = project_root / "output"
@@ -253,17 +306,6 @@ def _get_owned_task(thread_id: str, user: dict) -> dict:
     return task
 
 
-def _forget_task(thread_id: str, task: asyncio.Task) -> None:
-    """
-    清理已结束任务的登记关系。
-
-    done_callback 触发时，active_tasks 中可能已经被新任务替换；只有仍是同一个
-    task 时才删除，避免误清理同 thread_id 下刚启动的新任务。
-    """
-    if active_tasks.get(thread_id) is task:
-        active_tasks.pop(thread_id, None)
-
-
 # ---------------------------------------------------------------------------
 # 任务接口
 # ---------------------------------------------------------------------------
@@ -278,9 +320,13 @@ async def run_task(
     """
     启动一次 DeepAgents 后台任务。
 
-    HTTP 请求只负责创建后台协程并立即返回，后续执行轨迹、子智能体调用和最终
+    HTTP 请求只负责把任务提交到队列并立即返回，后续执行轨迹、子智能体调用和最终
     答案都会由 monitor 通过 `/ws/{thread_id}` 推送给同一会话的前端。
     任务登记信息写入 SQLite，可通过 /api/tasks 查询。
+
+    队列模式（第二期）：
+    - memory（默认）：任务在 API 进程内以后台协程执行；
+    - arq：任务入队 Redis，由独立 worker 进程执行，API 重启不丢任务。
 
     限流：每个用户 TASK_RATE_LIMIT 次 / TASK_RATE_WINDOW_SECONDS 秒，
     超限返回 429，防止 LLM 费用被打爆。
@@ -295,53 +341,54 @@ async def run_task(
 
     thread_id = request.thread_id or str(uuid.uuid4())
 
-    # 同一个 thread_id 只保留一个活跃任务，新任务会先取消旧任务，避免并发写同一会话目录
-    old_task = active_tasks.get(thread_id)
-    if old_task and not old_task.done():
-        old_task.cancel()
-
     # 任务与用户绑定，后续查询/取消都做归属校验
     task_store.create(thread_id, request.query, user_id=current_user["id"])
 
-    # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id, user_id=current_user["id"]))
-    active_tasks[thread_id] = task
-    task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
+    try:
+        submission = await get_task_queue().submit(
+            query=request.query,
+            thread_id=thread_id,
+            user_id=current_user["id"],
+        )
+    except Exception as e:
+        # 入队失败（如 Redis 不可用）：任务标记失败，不留下“ running 僵尸任务”
+        task_store.set_status(thread_id, STATUS_FAILED, error=f"任务入队失败: {e}")
+        logger.error("任务入队失败: thread_id=%s, error=%s", thread_id, e)
+        raise HTTPException(status_code=503, detail=f"任务队列暂不可用: {e}") from e
 
-    return {"status": "started", "thread_id": thread_id}
+    record_task_submitted()
+    logger.info("任务已提交: thread_id=%s, 队列=%s", thread_id, submission.queue_type)
+    return {"status": "started", "thread_id": thread_id, "queue": submission.queue_type}
 
 
 @app.post("/api/task/{thread_id}/cancel")
 async def cancel_task(thread_id: str, current_user: dict = Depends(get_current_user)):
     """
-    取消指定 thread_id 对应的后台 Agent 任务。
+    取消指定 thread_id 对应的后台任务。
 
-    注意：取消会向 asyncio.Task 注入 CancelledError。若底层第三方工具正在执行不可中断
-    的同步阻塞调用，任务可能需要等该调用返回后才会真正结束。
+    两种队列模式的取消语义：
+    - memory：直接取消进程内 asyncio 任务；
+    - arq：队列中未执行的任务由 arq abort；已开始执行的任务走协作式取消——
+      先把状态置为 cancelled，worker 在流式执行中定期检查并主动收尾。
     """
     # 先校验任务归属，再执行取消
     _get_owned_task(thread_id, current_user)
 
-    task = active_tasks.get(thread_id)
-    if not task or task.done():
-        active_tasks.pop(thread_id, None)
+    queue = get_task_queue()
+    result = await queue.cancel(thread_id)
+    if result == "not_found":
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
 
-    # 先发出取消信号，再短暂等待协程响应；若底层阻塞中，则返回 cancelling 给前端继续展示状态
-    task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=1.0)
-    except asyncio.CancelledError:
-        _forget_task(thread_id, task)
+    if result == "cancelled":
+        # 队列侧已中止：同步任务状态，保证列表/详情一致
+        task_store.set_status(thread_id, STATUS_CANCELLED)
+        record_task_cancelled()
         return {"status": "cancelled", "thread_id": thread_id}
-    except asyncio.TimeoutError:
-        return {"status": "cancelling", "thread_id": thread_id}
-    except Exception as e:
-        _forget_task(thread_id, task)
-        return {"status": "cancelled", "thread_id": thread_id, "message": str(e)}
 
-    _forget_task(thread_id, task)
-    return {"status": "cancelled", "thread_id": thread_id}
+    # cancelling：运行中任务无法强杀，置位取消标记等 worker 协作收尾
+    task_store.set_status(thread_id, STATUS_CANCELLED)
+    record_task_cancelled()
+    return {"status": "cancelling", "thread_id": thread_id}
 
 
 @app.get("/api/tasks")
@@ -369,6 +416,41 @@ async def get_task(thread_id: str, current_user: dict = Depends(get_current_user
     :return: 任务记录；不存在或不属于当前用户时返回 404
     """
     return {"task": _get_owned_task(thread_id, current_user)}
+
+
+@app.get("/api/task/{thread_id}/events")
+async def get_task_events(
+    thread_id: str,
+    after_seq: int = Query(default=0, ge=0),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    查询任务的执行事件（断线回放）
+
+    前端在 WebSocket 重连或页面刷新后，先按 after_seq 增量拉取历史事件，
+    再继续接收实时推送，避免执行过程“断档”。
+
+    :param thread_id: 任务会话 ID
+    :param after_seq: 只返回 seq 大于该值的事件（前端记录已收到的最大 seq）
+    :return: 事件列表与当前最大 seq
+    """
+    _get_owned_task(thread_id, current_user)
+
+    store = get_event_store()
+    events = store.list(thread_id, after_seq=after_seq)
+    return {"events": events, "last_seq": store.last_seq(thread_id)}
+
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Prometheus 指标端点（第二期可观测性）
+
+    暴露任务计数、活跃任务数、工具调用、接口请求与任务耗时分布；
+    采集配置示例见 README「可观测性」一节。
+    """
+    body, content_type = render_metrics()
+    return Response(content=body, media_type=content_type)
 
 
 # ---------------------------------------------------------------------------
@@ -564,19 +646,20 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     WebSocket 实时通讯核心接口 (Real-time Communication)。
 
     认证方式：连接 URL 携带 token 查询参数（浏览器 WebSocket 不支持自定义
-    请求头），服务端校验 JWT 并确认 thread_id 属于该用户后才接受连接。
+    请求头），服务端校验 JWT。
 
-    连接建立后，ConnectionManager 会用 thread_id 保存 WebSocket。monitor 后续
-    发送事件时只需要按 thread_id 查找连接，就能把进度推给对应页面。循环中的
-    receive_text 用于接收前端心跳，避免连接空闲断开。
+    归属校验语义（第二期修正）：
+    - 任务已存在且属于其他用户 -> 拒绝连接（403），防止越权订阅执行事件；
+    - 任务不存在 -> 允许连接。这是前端的正常工作流：客户端预生成 thread_id、
+      先建立 WebSocket 再提交任务；thread_id 为 UUID 且按用户本地存储，
+      猜测他人 thread_id 的可行性可忽略。
     """
     current_user = await _authenticate_websocket(websocket)
     if current_user is None:
         return
 
-    # 校验 thread_id 归属：只能接收自己任务的执行事件
     task = task_store.get(thread_id)
-    if task is None or task.get("user_id") != current_user["id"]:
+    if task is not None and task.get("user_id") != current_user["id"]:
         await websocket.close(code=4404, reason="任务不存在或不属于当前用户")
         logger.info("WebSocket 归属校验失败: thread_id=%s", thread_id)
         return

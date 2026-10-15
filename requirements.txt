@@ -11,6 +11,10 @@ langgraph-checkpoint-sqlite>=3.0.0  # SQLite 持久化检查点
 # --- 本地向量知识库 (RAG) ---
 faiss-cpu>=1.7.0            # 本地向量索引，替代原 RAGFlow 外部服务
 
+# --- 任务队列与可观测性（第二期）---
+arq>=0.26                   # 基于 Redis 的异步任务队列（TASK_QUEUE=arq 时启用）
+prometheus-client>=0.20     # Prometheus 指标暴露
+
 # --- 大模型服务 (LLM Services) ---
 langchain-openai==1.2.1     # OpenAI 接口适配（对话与 Embedding 共用）
 openai>=1.0.0               # OpenAI 官方 SDK
@@ -45,5 +49,6 @@ pydantic>=2.0.0             # 数据校验
 python-dotenv==1.2.2        # 环境变量管理
 typing-extensions>=4.5.0    # 类型兼容性支持
 
+# --- PostgreSQL 检查点（可选，见 pyproject.toml optional-dependencies.postgres）---
 # --- 开发与测试依赖见 pyproject.toml [dependency-groups].dev ---
 # 安装: uv sync --group dev（pytest / pytest-asyncio / pytest-cov / ruff / httpx）

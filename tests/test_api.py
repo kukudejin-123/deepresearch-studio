@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from app.api import server as server_module
 from app.api.rate_limit import task_rate_limiter
 from app.api.task_store import STATUS_CANCELLED, STATUS_RUNNING
+from app.queue import memory_queue as memory_queue_module
 
 
 @pytest.fixture
@@ -27,13 +28,14 @@ def client(auth_client, monkeypatch):
     """
     已登录 + run_deep_agent 被替换为立即返回的假协程
 
-    避免触发真实模型调用；取消测试另用长任务版本覆盖。
+    第二期改造后，任务执行由队列层调度：memory 队列在
+    app.queue.memory_queue 内调用 run_deep_agent，因此补丁打在该模块上。
     """
 
     async def fake_run(task_query, session_id, user_id=None):
         return None
 
-    monkeypatch.setattr(server_module, "run_deep_agent", fake_run)
+    monkeypatch.setattr(memory_queue_module, "run_deep_agent", fake_run)
     return auth_client
 
 
@@ -49,7 +51,7 @@ def slow_client(auth_client, monkeypatch):
             server_module.task_store.set_status(session_id, STATUS_CANCELLED)
             raise
 
-    monkeypatch.setattr(server_module, "run_deep_agent", slow_run)
+    monkeypatch.setattr(memory_queue_module, "run_deep_agent", slow_run)
     return auth_client
 
 
@@ -324,6 +326,49 @@ class TestFileApi:
 
         assert response.status_code == 200
         assert "报告内容" in response.text
+
+
+class TestEventReplay:
+    """执行事件回放接口（第二期）"""
+
+    def test_replay_returns_persisted_events(self, client):
+        """任务持久化的事件可以按 seq 拉取"""
+        thread_id = client.post("/api/task", json={"query": "回放测试"}).json()["thread_id"]
+
+        from app.events import get_event_store
+
+        store = get_event_store()
+        store.append(thread_id, "session_created", "工作目录已创建", {"path": "x"})
+        store.append(thread_id, "tool_start", "开始执行工具", {"tool_name": "T"})
+
+        response = client.get(f"/api/task/{thread_id}/events")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert [e["event"] for e in body["events"]] == ["session_created", "tool_start"]
+        assert body["last_seq"] == 2
+
+    def test_replay_incremental(self, client):
+        """after_seq 增量拉取（断线续传）"""
+        thread_id = client.post("/api/task", json={"query": "回放测试"}).json()["thread_id"]
+
+        from app.events import get_event_store
+
+        store = get_event_store()
+        store.append(thread_id, "tool_start", "a")
+        store.append(thread_id, "tool_start", "b")
+
+        response = client.get(f"/api/task/{thread_id}/events", params={"after_seq": 1})
+
+        assert [e["message"] for e in response.json()["events"]] == ["b"]
+
+    def test_replay_requires_ownership(self, auth_client, second_auth_client):
+        """他人任务的事件不可拉取（404）"""
+        thread_id = auth_client.post("/api/task", json={"query": "私有任务"}).json()["thread_id"]
+
+        response = second_auth_client.get(f"/api/task/{thread_id}/events")
+
+        assert response.status_code == 404
 
 
 class TestWebSocket:
