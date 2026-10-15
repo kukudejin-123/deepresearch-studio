@@ -16,6 +16,7 @@ DeepAgents 执行放到后台任务中；执行进度、工具调用和最终结
 """
 
 import asyncio
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -35,7 +36,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
@@ -74,6 +75,14 @@ logger = get_logger(__name__)
 
 # 单次请求允许的最大上传文件数
 MAX_UPLOAD_FILES = 10
+
+
+def _max_concurrent_tasks() -> int:
+    """单用户并发任务上限（可用 MAX_CONCURRENT_TASKS_PER_USER 覆盖）"""
+    try:
+        return max(1, int(os.getenv("MAX_CONCURRENT_TASKS_PER_USER", "2")))
+    except ValueError:
+        return 2
 
 
 @asynccontextmanager
@@ -339,6 +348,15 @@ async def run_task(
             headers={"Retry-After": str(int(retry_after) + 1)},
         )
 
+    # 单用户并发上限（第三期）：防止一个用户占满 worker / 打爆 LLM 配额。
+    # 计数来自共享 TaskStore，memory 与 arq 两种队列模式下都生效。
+    max_concurrent = _max_concurrent_tasks()
+    if task_store.count_running(user_id=current_user["id"]) >= max_concurrent:
+        raise HTTPException(
+            status_code=429,
+            detail=f"同时进行的任务数已达上限（{max_concurrent}），请等待现有任务完成",
+        )
+
     thread_id = request.thread_id or str(uuid.uuid4())
 
     # 任务与用户绑定，后续查询/取消都做归属校验
@@ -451,6 +469,27 @@ async def metrics():
     """
     body, content_type = render_metrics()
     return Response(content=body, media_type=content_type)
+
+
+@app.get("/api/health")
+async def health():
+    """
+    健康检查端点（第三期容器化）
+
+    供 Docker healthcheck / 负载均衡探活使用：检查进程存活与关键存储
+    （任务库）可读写。不触发 LLM、MySQL 等外部依赖，避免探活误判。
+    """
+    checks: dict[str, str] = {"status": "ok"}
+    try:
+        # 轻量探测任务存储可读写（建表语句是幂等的）
+        task_store.list(limit=1)
+        checks["task_store"] = "ok"
+    except Exception as e:
+        checks["task_store"] = f"error: {e}"
+        checks["status"] = "degraded"
+
+    status_code = 200 if checks["status"] == "ok" else 503
+    return JSONResponse(status_code=status_code, content=checks)
 
 
 # ---------------------------------------------------------------------------

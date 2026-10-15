@@ -102,11 +102,16 @@ class TestUploadFileReadTool:
 
 
 class TestDbTools:
-    """db_tools 工具验证（mock MySQL 连接）"""
+    """db_tools 工具验证（mock MySQL 连接池）"""
 
     @pytest.fixture
     def mock_connect(self, monkeypatch):
-        """伪造 mysql.connector.connect，返回假连接与假游标"""
+        """
+        伪造 MySQL 连接池（只 mock 池构造这一层）
+
+        保留真实的 get_connection_pool 缓存逻辑，让工具测试与池复用
+        测试都能覆盖到真实代码路径；每次测试重置池单例避免串用。
+        """
         from app.tools import db_tools
 
         class FakeCursor:
@@ -134,7 +139,24 @@ class TestDbTools:
             def cursor(self):
                 return FakeCursor()
 
-        monkeypatch.setattr(db_tools, "connect", lambda **kwargs: FakeConn())
+            def close(self):
+                # 连接池语义：close = 归还连接
+                return True
+
+        created: list = []
+
+        class FakeMySQLPool:
+            def __init__(self, **kwargs):
+                created.append(self)
+
+            def get_connection(self):
+                return FakeConn()
+
+        monkeypatch.setattr(db_tools, "MySQLConnectionPool", FakeMySQLPool)
+        monkeypatch.setattr(db_tools, "_connection_pool", None)
+        monkeypatch.setattr(db_tools, "_pool_signature", None)
+        # 池实例计数挂到模块上，供复用/重建断言使用
+        db_tools._test_pool_instances = created
         return db_tools
 
     def test_list_sql_tables(self, mock_connect, monkeypatch):
@@ -166,6 +188,30 @@ class TestDbTools:
 
         with pytest.raises(ValueError, match="缺失数据库核心配置"):
             mock_connect.get_db_config()
+
+    def test_pool_reused_across_calls(self, mock_connect, monkeypatch):
+        """同一配置下连接池实例复用（真实缓存逻辑，mock 池构造）"""
+        monkeypatch.setenv("MYSQL_USER", "root")
+        monkeypatch.setenv("MYSQL_PASSWORD", "root")
+        monkeypatch.setenv("MYSQL_DATABASE", "deepresearch_db")
+
+        pool_first = mock_connect.get_connection_pool()
+        pool_second = mock_connect.get_connection_pool()
+
+        assert pool_first is pool_second
+        assert len(mock_connect._test_pool_instances) == 1
+
+    def test_pool_rebuilt_on_config_change(self, mock_connect, monkeypatch):
+        """配置变化时连接池重建（测试环境切换数据库）"""
+        monkeypatch.setenv("MYSQL_USER", "root")
+        monkeypatch.setenv("MYSQL_PASSWORD", "root")
+        monkeypatch.setenv("MYSQL_DATABASE", "db_one")
+
+        mock_connect.get_connection_pool()
+        monkeypatch.setenv("MYSQL_DATABASE", "db_two")
+        mock_connect.get_connection_pool()
+
+        assert len(mock_connect._test_pool_instances) == 2
 
     def test_execute_sql_rejects_drop(self, mock_connect, monkeypatch):
         """工具层拦截 DROP：不连接数据库，直接返回安全策略提示"""

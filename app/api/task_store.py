@@ -135,6 +135,25 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE thread_id = ?", (thread_id,)).fetchone()
         return dict(row) if row else None
 
+    def count_running(self, user_id: Optional[int] = None) -> int:
+        """
+        统计运行中的任务数
+
+        :param user_id: 只统计该用户的任务；None 表示全部
+        :return: running 状态的任务数量
+        """
+        with self._connect() as conn:
+            if user_id is None:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM tasks WHERE status = ?", (STATUS_RUNNING,)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM tasks WHERE status = ? AND user_id = ?",
+                    (STATUS_RUNNING, user_id),
+                ).fetchone()
+        return int(row["c"])
+
     def list(
         self,
         user_id: Optional[int] = None,

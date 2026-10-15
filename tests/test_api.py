@@ -140,8 +140,10 @@ class TestTaskApi:
 
         assert response.status_code == 404
 
-    def test_task_rate_limit(self, client):
+    def test_task_rate_limit(self, client, monkeypatch):
         """超过频率限制的任务提交返回 429"""
+        # 放宽并发上限，隔离验证频率限流本身
+        monkeypatch.setenv("MAX_CONCURRENT_TASKS_PER_USER", "100")
         rate_key = f"task:{_current_user_id(client)}"
         task_rate_limiter.reset(rate_key)
 
@@ -152,6 +154,32 @@ class TestTaskApi:
 
         assert blocked.status_code == 429
         assert "Retry-After" in blocked.headers
+
+    def test_concurrent_task_limit(self, client, monkeypatch):
+        """单用户并发任务数超限返回 429（第三期）"""
+        monkeypatch.setenv("MAX_CONCURRENT_TASKS_PER_USER", "2")
+
+        first = client.post("/api/task", json={"query": "任务1"})
+        second = client.post("/api/task", json={"query": "任务2"})
+        third = client.post("/api/task", json={"query": "任务3"})
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert third.status_code == 429
+        assert "上限" in third.json()["detail"]
+
+    def test_concurrent_limit_counts_running_only(self, client, monkeypatch):
+        """已结束的任务不占用并发名额"""
+        monkeypatch.setenv("MAX_CONCURRENT_TASKS_PER_USER", "1")
+        first = client.post("/api/task", json={"query": "任务1"})
+        thread_id = first.json()["thread_id"]
+
+        # 手动把任务标记为完成，腾出并发名额
+        server_module.task_store.set_status(thread_id, "completed")
+
+        second = client.post("/api/task", json={"query": "任务2"})
+
+        assert second.status_code == 200
 
 
 class TestResourceIsolation:
@@ -369,6 +397,19 @@ class TestEventReplay:
         response = second_auth_client.get(f"/api/task/{thread_id}/events")
 
         assert response.status_code == 404
+
+
+class TestHealthEndpoint:
+    """健康检查端点（第三期容器化）"""
+
+    def test_health_ok(self, client):
+        """健康检查返回 200 与状态字段"""
+        response = client.get("/api/health")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "ok"
+        assert body["task_store"] == "ok"
 
 
 class TestWebSocket:

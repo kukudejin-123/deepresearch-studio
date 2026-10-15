@@ -1,0 +1,205 @@
+# DeepResearch Studio 评测集
+#
+# 覆盖六类任务：网络检索、数据库查询、知识库检索、文件读取、多源综合、文件生成。
+# 每个用例的三层校验：
+#   1. must_include / must_not_include：答案确定性检查（不调用 LLM）；
+#   2. expected_events / expected_tools：执行链路检查（工具真的被走到）；
+#   3. rubric_hints：交给 LLM 评审的补充说明（正确性/完整性/有据性打分）。
+#
+# 运行方式：
+#   uv run python -m app.eval run --dataset docs/eval/cases.yaml
+#   uv run python -m app.eval run --dataset docs/eval/cases.yaml --mock   # 框架冒烟
+#
+# 注意：网络/知识库类用例需要真实 API Key 与已构建的向量库；
+# 文件读取类用例通过 seed_files 预置上传文件（相对 examples/test_docs）。
+
+cases:
+  # ---------------------------------------------------------------------------
+  # 网络检索（4）
+  # ---------------------------------------------------------------------------
+  - id: net-001
+    category: network_search
+    query: 检索 2026 年 AI 在电商行业的应用趋势，列出 3 条关键变化。
+    must_include: ["2026", "电商"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["网络搜索"]
+    rubric_hints: 回答应给出至少 3 条具体变化，且与 2026 年电商 AI 主题相关，不得泛泛而谈。
+
+  - id: net-002
+    category: network_search
+    query: 搜索国家医保药品目录最新调整政策，摘要主要变化。
+    must_include: ["医保"]
+    expected_events: [tool_start]
+    expected_tools: ["网络搜索"]
+    rubric_hints: 应涉及医保目录调整的政策内容；若搜索结果不足，应说明信息有限而非编造。
+
+  - id: net-003
+    category: network_search
+    query: 检索布洛芬在消炎镇痛领域的最新临床应用研究。
+    must_include: ["布洛芬"]
+    expected_events: [tool_start]
+    expected_tools: ["网络搜索"]
+    rubric_hints: 应围绕布洛芬的临床应用，检索结果应被如实转述。
+
+  - id: net-004
+    category: network_search
+    query: 查询 2026 年中国直播电商市场规模与增速数据。
+    must_include: ["直播"]
+    expected_events: [tool_start]
+    expected_tools: ["网络搜索"]
+    rubric_hints: 应给出市场规模或增速类数据，并注明来自公开检索；无数据时不得虚构数字。
+
+  # ---------------------------------------------------------------------------
+  # 数据库查询（5）
+  # ---------------------------------------------------------------------------
+  - id: db-001
+    category: database_query
+    query: 查询阿莫西林胶囊在各仓库的库存数量，并列出仓库位置。
+    must_include: ["阿莫西林"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库"]
+    rubric_hints: 库存数字应来自数据库查询结果，仓库位置需与库中记录一致。
+
+  - id: db-002
+    category: database_query
+    query: 统计库存数量最多的前 5 种药品，按库存降序列出药品名称与数量。
+    must_include: ["库存"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库"]
+    rubric_hints: 应为 5 条降序结果，数量来自库存表；排序方向不得颠倒。
+
+  - id: db-003
+    category: database_query
+    query: 列出数据库中治疗领域为抗生素的药品及其生产企业。
+    must_include: ["抗生素"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库"]
+    rubric_hints: 结果应限于抗生素类药品，生产企业字段需来自 drugs 表。
+
+  - id: db-004
+    category: database_query
+    query: 查询布洛芬缓释胶囊的销售记录，统计总销量与总金额。
+    must_include: ["布洛芬"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库"]
+    rubric_hints: 总销量与总金额应由销售记录聚合得出，计算需正确。
+
+  - id: db-005
+    category: database_query
+    query: 芬必得是哪个厂家生产的？它的规格和剂型是什么？
+    must_include: ["芬必得"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库"]
+    rubric_hints: 厂家、规格、剂型均应来自药品主数据表，不得凭常识编造。
+
+  # ---------------------------------------------------------------------------
+  # 知识库检索（4）
+  # ---------------------------------------------------------------------------
+  - id: kb-001
+    category: knowledge_base
+    query: 结合本地知识库中电商行业的资料，总结 AI 在电商运营中的三个应用场景。
+    must_include: ["电商"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["知识库"]
+    rubric_hints: 应基于知识库检索结果总结，场景需具体；检索无结果时不得伪装成检索结论。
+
+  - id: kb-002
+    category: knowledge_base
+    query: 检索本地知识库中关于货币政策与金融市场的研究结论。
+    must_include: ["金融"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["知识库"]
+    rubric_hints: 结论应能在知识库文档中找到依据，回答需体现来源文档的要点。
+
+  - id: kb-003
+    category: knowledge_base
+    query: 知识库中关于数字人电商直播的内容有哪些关键数据？
+    must_include: ["数字人"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["知识库"]
+    rubric_hints: 关键数据需来自知识库文档；无对应文档时应说明未找到。
+
+  - id: kb-004
+    category: knowledge_base
+    query: 本地知识库里对 2026 年全球投资展望持什么观点？
+    must_include: ["投资"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["知识库"]
+    rubric_hints: 观点应引用知识库文档，区分“文档观点”与“模型自己的判断”。
+
+  # ---------------------------------------------------------------------------
+  # 文件读取（3）
+  # ---------------------------------------------------------------------------
+  - id: file-001
+    category: file_reading
+    query: 读取我上传的测试文件，总结其中的核心内容。
+    seed_files: ["sub_dir/测试文件.md"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["文件内容读取"]
+    rubric_hints: 总结应基于上传文件的实际内容，不得引入文件中不存在的信息。
+
+  - id: file-002
+    category: file_reading
+    query: 读取上传的金融电商行业分析报告，提炼三条核心结论。
+    seed_files: ["sub_dir/金融电商行业分析报告.md"]
+    must_include: ["金融"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["文件内容读取"]
+    rubric_hints: 三条结论应分别可从报告中找到对应段落，提炼需准确。
+
+  - id: file-003
+    category: file_reading
+    query: 读取上传的 PDF 文件，告诉我文档里有什么内容。
+    seed_files: ["sub_dir/测试文件.pdf"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["文件内容读取"]
+    rubric_hints: 应反映 PDF 的实际文本内容；若 PDF 为扫描件无法提取文字，应如实说明。
+
+  # ---------------------------------------------------------------------------
+  # 多源综合（3）
+  # ---------------------------------------------------------------------------
+  - id: multi-001
+    category: multi_source
+    query: 结合数据库中的药品销售数据和本地知识库资料，分析抗生素药品的市场情况。
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库", "知识库"]
+    rubric_hints: 数据库部分应给出真实查询结果，知识库部分应有文档依据；两者结论需区分来源。
+
+  - id: multi-002
+    category: multi_source
+    query: 先联网检索解热镇痛药行业动态，再对比数据库中布洛芬的销售数据，给出简要分析。
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["网络搜索", "数据库"]
+    rubric_hints: 行业动态应来自网络检索，销售数据应来自数据库；分析需同时引用两类信息。
+
+  - id: multi-003
+    category: multi_source
+    query: 综合公开网络资料、内部数据库和本地知识库，概述镇痛类药物当前的市场格局。
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["网络搜索", "数据库", "知识库"]
+    rubric_hints: 三类来源都应被使用并明确标注；任一来源缺失都应在完整性上扣分。
+
+  # ---------------------------------------------------------------------------
+  # 文件生成（3）
+  # ---------------------------------------------------------------------------
+  - id: gen-001
+    category: file_generation
+    query: 从数据库中查询阿莫西林胶囊的库存情况，并生成一份 Markdown 报告保存到工作目录。
+    must_include: ["阿莫西林"]
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["数据库", "Markdown文档生成"]
+    rubric_hints: 报告内容应包含真实库存数据，且确认文件已生成；不得只给文字不给文件。
+
+  - id: gen-002
+    category: file_generation
+    query: 检索知识库中电商行业的资料，生成一份 PDF 报告。
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["知识库", "Markdown"]
+    rubric_hints: 需先有 Markdown 再转 PDF；报告内容应来自知识库检索结果。
+
+  - id: gen-003
+    category: file_generation
+    query: 联网检索 2026 年 AI 制药趋势，把检索结果整理成一份 Markdown 报告。
+    expected_events: [assistant_call, tool_start]
+    expected_tools: ["网络搜索", "Markdown文档生成"]
+    rubric_hints: 报告应基于真实检索结果整理，不得将检索与生成放在同一步骤糊弄了事。

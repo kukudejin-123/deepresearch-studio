@@ -1,0 +1,187 @@
+# DeepResearch Studio 全栈部署（第三期容器化）
+#
+# 一键启动：
+#   docker compose up -d                # 默认栈：api + worker + frontend + mysql + redis
+#   docker compose --profile postgres up -d   # 追加 PostgreSQL（postgres 检查点模式）
+#
+# 关键设计：
+# 1. api 与 worker 共用同一后端镜像，worker 仅覆盖启动命令（arq worker）；
+# 2. api/worker/frontend 通过数据卷共享 SQLite 数据（检查点/事件/用户库），
+#    输出目录与上传目录同样共享——worker 写、api 读；
+# 3. MySQL（教学数据）与 Redis（队列 + 事件桥）由本栈提供；
+# 4. 前端经 Nginx 同源反代 /api、/ws、/metrics，浏览器只面对 80 端口。
+
+name: deepresearch-studio
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepresearch-studio-api:latest
+    command: ["uvicorn", "app.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: [.env]
+    environment:
+      # 容器网络内覆盖 .env 的主机地址
+      TASK_QUEUE: arq
+      TASK_QUEUE_REDIS_URL: redis://redis:6379/0
+      MYSQL_HOST: mysql
+      CHECKPOINTER_DB: /app/app/data/checkpoints.db
+      AUTH_DB: /app/app/data/users.db
+      EVENT_DB: /app/app/data/events.db
+      VECTOR_STORE_DIR: /app/app/data/vector_store
+    ports:
+      - "8000:8000"
+    volumes:
+      - deepresearch_data:/app/app/data
+      - deepresearch_output:/app/app/output
+      - deepresearch_updated:/app/app/updated
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepresearch-studio-api:latest
+    command: ["arq", "app.worker.tasks.WorkerSettings"]
+    env_file: [.env]
+    environment:
+      TASK_QUEUE_REDIS_URL: redis://redis:6379/0
+      MYSQL_HOST: mysql
+      CHECKPOINTER_DB: /app/app/data/checkpoints.db
+      EVENT_DB: /app/app/data/events.db
+      VECTOR_STORE_DIR: /app/app/data/vector_store
+    volumes:
+      - deepresearch_data:/app/app/data
+      - deepresearch_output:/app/app/output
+      - deepresearch_updated:/app/app/updated
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # worker 无 HTTP 端点，用“能连通 Redis”作为存活探针
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import redis; redis.from_url('redis://redis:6379/0', socket_timeout=3).ping()",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 空串 = 同源部署，前端经 Nginx 反代访问后端
+        VITE_API_BASE_URL: ""
+    image: deepresearch-studio-frontend:latest
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    container_name: deepresearch-mysql
+    env_file: [.env]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-root}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-deepresearch_db}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --sql-mode=TRADITIONAL
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - deepresearch_mysql:/var/lib/mysql
+      - ./docker/mysql/mysql.sql:/docker-entrypoint-initdb.d/01-init-pharma.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: deepresearch-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - deepresearch_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 可选：PostgreSQL（profile: postgres）
+  # 用途：CHECKPOINTER_TYPE=postgres 时多 worker 共享会话状态。
+  # 启用方式：docker compose --profile postgres up -d，
+  # 并在 .env 中设置 CHECKPOINTER_TYPE=postgres 与
+  # CHECKPOINTER_POSTGRES_DSN=postgresql://postgres:postgres@postgres:5432/deepresearch
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: deepresearch-postgres
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: deepresearch
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - deepresearch_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d deepresearch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  deepresearch_data:
+  deepresearch_output:
+  deepresearch_updated:
+  deepresearch_mysql:
+  deepresearch_redis:
+  deepresearch_postgres:

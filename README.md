@@ -90,7 +90,7 @@
 - **工程化前后端结构清晰**
   - 基于 `FastAPI + WebSocket + DeepAgents + React` 组织任务接口、异步执行、事件推送、文件上传和文件下载。
 - **测试与 CI 全覆盖**
-  - 184 个 pytest 用例覆盖路径解析与写入边界、文件工具、数据库工具（mock）、向量库全链路（FakeEmbeddings）、检查点、任务存储、认证与资源隔离、上传与限流、事件回放、队列与指标、API/WebSocket、智能体组装；
+  - 241 个 pytest 用例覆盖路径解析与写入边界、文件工具、数据库工具（mock）、向量库全链路（FakeEmbeddings）、检查点、任务存储、认证与资源隔离、上传与限流、事件回放、队列与指标、API/WebSocket、智能体组装；
   - GitHub Actions 流水线：ruff lint + ruff format + pytest（CI 含 Redis 服务，arq 队列用例真实运行）。
 - **分布式任务队列与断线续传（第二期可靠执行）**
   - 任务队列抽象：`memory`（进程内，默认）/ `arq`（Redis 分布式）双实现，环境变量一行切换；
@@ -101,6 +101,15 @@
 - **可观测性（第二期）**
   - Prometheus 指标端点 `/metrics`：任务计数（按状态）、活跃任务数、工具调用、接口请求、任务耗时分布；
   - 全链路结构化日志；Langfuse/OpenTelemetry 接入点已预留（见改造说明）。
+- **质量评估体系（第三期）**
+  - 22 个评测用例覆盖六类任务（网络检索/数据库/知识库/文件读取/多源综合/文件生成）；
+  - 三层判定：确定性检查（关键词/禁用语，零成本）+ 执行链路检查（工具真的被走到）+ LLM-as-judge 按 rubric 打分（正确性/完整性/有据性）；
+  - 结果落库，支持运行间对比与回归检测（分数下降/由通过转失败），CI 门禁可卡通过率；
+  - CLI：`python -m app.eval run / compare / list`，`--mock` 冒烟模式不调用外部服务。
+- **容器化与 CI/CD（第三期）**
+  - 后端/前端多阶段 Dockerfile（非 root、健康检查、层缓存），一键 compose 起全栈（api/worker/frontend/mysql/redis，postgres 可选 profile）；
+  - 前端 Nginx 同源反代 /api、/ws、/metrics，单端口对外，免跨域；
+  - GitHub Actions：镜像构建推送 GHCR + 每周评测回归（结果存 artifact）。
 - **多用户体系与资源隔离（第一期安全改造）**
   - 注册 / 登录 + JWT 认证，除认证接口外的所有资源接口默认要求登录；
   - 任务、上传文件、输出目录、私有知识库全部按 `user_id` 隔离，接口层校验资源归属，跨用户访问一律按 404 拒绝；
@@ -163,6 +172,8 @@
 | 任务队列       | `arq` / `Redis`                                  | 分布式任务队列（TASK_QUEUE=arq），执行进程与接口进程隔离                     |
 | 测试与 CI      | `pytest` / `ruff` / `GitHub Actions`             | 单元与接口测试、代码规范检查、持续集成（CI 含 Redis 服务）                   |
 | 可观测性       | `prometheus-client`                              | `/metrics` 指标端点：任务、工具调用、接口请求与耗时分布                      |
+| 质量评估       | LLM-as-judge + rubric                            | 评测集、三层判定、回归对比与 CI 门禁                                        |
+| 部署           | `Docker` / `docker-compose` / `Nginx`            | 多阶段镜像、全栈编排、同源反代                                              |
 | 依赖管理       | `uv` / `pnpm`                                    | 管理 Python 后端和前端依赖                                                    |
 
 ## 📁 项目结构
@@ -202,12 +213,24 @@ deepresearch-studio/
 │   │   └── sql_guard.py            # SQL 只读校验与表名白名单
 │   ├── worker/                     # arq worker 进程入口（第二期新增）
 │   │   └── tasks.py                # WorkerSettings 与 run_agent_task
+│   ├── eval/                       # Agent 质量评估体系（第三期新增）
+│   │   ├── dataset.py              # 评测集定义/加载 + 确定性与链路检查
+│   │   ├── judge.py                # LLM-as-judge 评审与结构化解析
+│   │   ├── runner.py               # 评测执行器（三层判定）
+│   │   ├── store.py                # 结果存储与回归对比
+│   │   ├── report.py               # Markdown 报告渲染
+│   │   └── __main__.py             # CLI: run / compare / list
 │   ├── utils/                      # 路径解析、日志配置、Markdown/PDF 底层转换
 │   ├── data/                       # 运行时生成：向量库索引、检查点与用户数据库（git 忽略）
 │   ├── output/                     # 运行时生成：按用户/会话隔离的 Markdown、PDF 等产物
 │   └── updated/                    # 运行时生成：按用户/会话隔离的上传暂存目录
 ├── tests/                          # pytest 测试套件
+├── docs/eval/cases.yaml            # 评测集（22 个用例，第三期新增）
+├── Dockerfile                      # 后端多阶段镜像（api/worker 共用）
+├── docker-compose.yaml             # 全栈编排（api/worker/frontend/mysql/redis）
 ├── .github/workflows/ci.yml        # GitHub Actions 持续集成
+├── .github/workflows/docker.yml    # 镜像构建推送 GHCR
+└── .github/workflows/eval.yml      # 评测回归（定时 + 手动）
 ├── docker/
 │   ├── docker-compose.yaml         # 本地 MySQL 教学环境
 │   └── mysql/mysql.sql             # 药品、库存、销售记录模拟数据
@@ -401,10 +424,56 @@ VITE_WS_BASE_URL=ws://localhost:8000
 ### 10. 运行测试
 
 ```bash
-uv run python -m pytest          # 运行全部测试
-uv run ruff check app tests      # 代码规范检查
-uv run ruff format --check app tests  # 格式检查
+uv run python -m pytest                # 运行全部测试
+uv run ruff check app tests            # 代码规范检查
+uv run ruff format --check app tests   # 格式检查
 ```
+
+### 11. Docker 一键部署（全栈）
+
+```bash
+# 准备 .env（至少配置 LLM 与 Tavily 密钥）后：
+docker compose up -d                # api + worker + frontend + mysql + redis
+docker compose --profile postgres up -d   # 追加 PostgreSQL（postgres 检查点模式）
+
+# 访问
+#   前端:  http://localhost:8080   （Nginx 同源反代 /api、/ws、/metrics）
+#   API:   http://localhost:8000   （/docs 查看接口文档）
+# MySQL:  localhost:3307
+# Redis:  localhost:6379
+```
+
+说明：
+
+- `api` 与 `worker` 共用同一镜像，仅启动命令不同；两者通过数据卷共享
+  SQLite 数据（检查点/事件/用户库）与产物目录；
+- 前端容器构建参数 `VITE_API_BASE_URL` 传空串即同源部署，浏览器只面对 80 端口；
+- 生产环境建议：`CHECKPOINTER_TYPE=postgres`（启用 postgres profile）、
+  镜像推送到自有 Registry、按负载水平扩展 worker 副本数。
+
+### 12. 质量评估（Agent 评测）
+
+```bash
+# 冒烟模式：验证框架本身，不调用任何外部服务
+uv run python -m app.eval run --dataset docs/eval/cases.yaml --mock
+
+# 真实评测：跑真实 Agent + LLM 评审（需要 API Key 与已构建的向量库）
+uv run python -m app.eval run --dataset docs/eval/cases.yaml
+
+# 回归对比：与上一次运行比较，检测质量退化
+uv run python -m app.eval list                    # 查看历史运行
+uv run python -m app.eval compare --baseline <run_a> --current <run_b>
+```
+
+评测三层判定：
+
+| 层级 | 内容 | 成本 |
+| --- | --- | --- |
+| 确定性检查 | 答案必须/不得包含的关键信息 | 零成本，CI 可随时跑 |
+| 执行链路检查 | 期望的工具/事件是否真的被走到 | 零成本 |
+| LLM 评审 | correctness / completeness / groundedness 三维打分 | 一次评审调用 |
+
+`--min-pass-rate` 门禁失败时退出码非零，可直接接入 CI。
 
 <a id="changelog"></a>
 
@@ -537,6 +606,52 @@ uv run ruff format --check app tests  # 格式检查
   调用 `get_message` 会抛 "pubsub connection not set" 并中断整个桥接循环，
   改为零订阅时跳过读取。
 
+### 8. 第三期：质量评估、容器化与性能
+
+**质量评估体系（app/eval/）**
+
+- `dataset.py`：评测集 YAML 定义与加载（22 个用例、六类任务），
+  内置确定性检查（关键词/禁用语）与执行链路检查（期望工具全部命中，
+  子串匹配）；
+- `judge.py`：LLM-as-judge 按 rubric 三维打分（correctness /
+  completeness / groundedness），输出强制 JSON，解析失败自动重试一次；
+  解析器容忍 markdown 包裹与杂质文本，拒绝越界分数；
+- `runner.py`：复用主链路 `run_deep_agent` 执行用例，执行事件天然落库，
+  跑完按 thread_id 读回——无需额外埋点；`seed_files` 支持为文件读取类
+  用例预置上传文件；
+- `store.py`：SQLite 结果存储，支持运行间对比（分数下降超阈值或由通过
+  转失败判定回归）；
+- `report.py` + `__main__.py`：Markdown 报告与 CLI（run/compare/list），
+  `--mock` 冒烟模式用假执行器 + 假评审跑通全链路，`--min-pass-rate`
+  门禁失败返回非零退出码；
+- 评测过程中修复三个真实缺陷：集合成员判断误用为子串匹配（导致
+  “数据库”这类工具名永远判未命中）、空权重未退化为平均导致分数恒为 0、
+  同秒提交的运行排序不稳定。
+
+**容器化与部署**
+
+- 后端 `Dockerfile`：多阶段构建（uv 装依赖 → 精简运行镜像），非 root
+  用户、层缓存、内置 `/api/health` 健康检查；api 与 worker 共用镜像；
+- 前端 `frontend/Dockerfile` + `nginx.conf`：Node 构建 → Nginx 服务，
+  同源反代 `/api`、`/ws`、`/metrics`，SPA 路由回退，静态资源长缓存；
+- 根 `docker-compose.yaml`：api/worker/frontend/mysql/redis 五服务 +
+  postgres 可选 profile；api 与 worker 通过数据卷共享 SQLite 数据与
+  产物目录（否则两个容器各写各的库，任务状态与事件全部对不上）；
+- CI：`.github/workflows/docker.yml` 构建推送 GHCR，
+  `.github/workflows/eval.yml` 每周评测回归（报告存 artifact）。
+- 注意：本机无 Docker，镜像未经实际构建验证；compose 文件已通过
+  YAML 结构与服务依赖审查，首次部署如遇问题以构建日志为准。
+
+**性能优化**
+
+- Embedding LRU 缓存（`CachedEmbeddings`）：向量化是纯函数，相同
+  文本/问题不重复请求；缓存容量可配置，多 worker 各进程独立；
+- MySQL 连接池（`MySQLConnectionPool`，大小可配置）：避免每次工具
+  调用重新握手；配置变化时自动重建（测试隔离）；
+- 单用户并发任务上限（`MAX_CONCURRENT_TASKS_PER_USER`，默认 2）：
+  计数来自共享 TaskStore，memory/arq 两种队列模式下都生效；
+- `GET /api/health` 健康检查端点（不依赖 LLM/MySQL，避免探活误判）。
+
 ## 📚 配套教程目录
 
 教程总入口：[深度研搜完整教程](https://didilili.github.io/ai-agents-from-zero/#/实战项目-深度研搜/0-前言)
@@ -563,14 +678,14 @@ uv run ruff format --check app tests  # 格式检查
 
 ## 🚧 能力边界
 
-改造版覆盖了 DeepAgents 多智能体调度、真实工具接入、本地 RAG、文件交付、FastAPI 接口、WebSocket 实时推送、SQLite/PostgreSQL 会话持久化、任务生命周期管理、JWT 用户体系与按用户资源隔离、SQL/上传安全校验、接口限流、memory/arq 双模式任务队列、事件持久化与断线回放、Prometheus 指标，并具备 184 个测试与 CI。
+改造版覆盖了 DeepAgents 多智能体调度、真实工具接入、本地 RAG、文件交付、FastAPI 接口、WebSocket 实时推送、SQLite/PostgreSQL 会话持久化、任务生命周期管理、JWT 用户体系与按用户资源隔离、SQL/上传安全校验、接口限流、memory/arq 双模式任务队列、事件持久化与断线回放、Prometheus 指标、22 用例评估体系与回归对比、Docker 全栈部署与镜像 CI，并具备 241 个测试与 CI。
 
 以下生产治理能力仍未展开，适合作为后续迭代方向：
 
 - 角色权限细分（当前是“本人 or 拒绝”的粗粒度模型）和文件内容审核；
 - 运行中任务的断点续跑（当前取消即终止，检查点已具备恢复条件但未实现 resume）；
 - 多实例部署的细节：检查点/限流/事件库默认仍是单机 SQLite，arq 模式下需切
-  PostgreSQL + Redis 共享（代码路径已就绪）；
+  PostgreSQL + Redis 共享（代码路径已就绪，compose 已提供 postgres profile）；
 - 全量事件的历史会话浏览界面与审计追踪；
-- 系统化评测集、自动化回归和 Agent 质量评估；
+- 评测集扩充与评审维度细化（当前 22 个用例偏冒烟，覆盖广度优先于深度）；
 - 日志聚合、告警规则与链路追踪平台接入（埋点已预留）。

@@ -7,13 +7,19 @@ execute_sql_query 用于在确认结构后执行自定义查询。
 
 安全说明：模型生成的 SQL 在工具层经过 sql_guard 硬校验
 （只读语句 + 关键字黑名单 + 单语句 + 表名白名单），不依赖提示词约束。
+
+性能说明（第三期）：连接通过 mysql.connector 连接池复用，
+避免每次工具调用都重新握手（含 TLS 与认证），池大小由
+MYSQL_POOL_SIZE 配置（默认 4）。
 """
 
 import os
+from typing import Optional
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from mysql.connector import Error, connect
+from mysql.connector import Error
+from mysql.connector.pooling import MySQLConnectionPool
 
 from app.api.monitor import monitor
 from app.tools.sql_guard import validate_readonly_sql, validate_table_name
@@ -23,6 +29,10 @@ load_dotenv()
 
 logger = get_logger(__name__)
 
+# 进程级连接池：配置变化（测试环境）时自动重建
+_connection_pool: Optional[MySQLConnectionPool] = None
+_pool_signature: Optional[str] = None
+
 
 # 集中读取数据库配置，后续三个工具都复用这份连接参数
 def get_db_config():
@@ -30,7 +40,7 @@ def get_db_config():
     从环境变量读取 MySQL 连接配置
 
     所有数据库工具都通过此函数拿到同一份连接参数，避免每个工具重复读取环境变量
-    :return: mysql.connector.connect 可直接使用的连接参数
+    :return: mysql.connector 可直接使用的连接参数
     """
     config = {
         "host": os.getenv("MYSQL_HOST", "localhost"),
@@ -56,6 +66,71 @@ def get_db_config():
     return config
 
 
+def _pool_size() -> int:
+    """连接池大小（默认 4）"""
+    try:
+        return max(1, int(os.getenv("MYSQL_POOL_SIZE", "4")))
+    except ValueError:
+        return 4
+
+
+def get_connection_pool() -> MySQLConnectionPool:
+    """
+    获取进程级 MySQL 连接池
+
+    池的创建是惰性的：第一次真正查询时才建立连接，未配置数据库时
+    不会在导入阶段报错。配置变化（如测试切换数据库）时自动重建。
+    """
+    global _connection_pool, _pool_signature
+
+    config = get_db_config()
+    # 用配置签名判断是否需要重建（环境变量在测试中会被修改）
+    signature = "|".join(f"{k}={config.get(k)}" for k in sorted(config))
+
+    if _connection_pool is None or _pool_signature != signature:
+        _connection_pool = MySQLConnectionPool(
+            pool_name="deepsearch_pool",
+            pool_size=_pool_size(),
+            **config,
+        )
+        _pool_signature = signature
+        logger.info(
+            "MySQL 连接池已创建: %s:%s/%s（池大小 %d）",
+            config.get("host"),
+            config.get("port"),
+            config.get("database"),
+            _pool_size(),
+        )
+    return _connection_pool
+
+
+class pooled_connection:
+    """
+    连接池上下文管理器：获取连接，退出时归还池中
+
+    用法：
+        with pooled_connection() as conn:
+            with conn.cursor() as cursor:
+                ...
+    """
+
+    def __init__(self):
+        self._conn = None
+
+    def __enter__(self):
+        self._conn = get_connection_pool().get_connection()
+        return self._conn
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._conn is not None:
+            try:
+                # 连接池的 close() 语义是“归还”而非断开
+                self._conn.close()
+            except Error:
+                pass
+        return False
+
+
 @tool
 def list_sql_tables() -> str:
     """
@@ -70,9 +145,6 @@ def list_sql_tables() -> str:
     # 埋点：工具一被调用，前端可以展示当前正在查询数据库表名
     monitor.report_tool(tool_name="数据库表名查询工具：list_sql_tables", args={})
 
-    # 加载数据库连接信息
-    config = get_db_config()
-
     # MySQL 查询的固定步骤：
     # 1. 创建连接
     # 2. 创建 cursor
@@ -82,7 +154,7 @@ def list_sql_tables() -> str:
     # 这里捕获异常并返回中文提示，避免工具报错直接中断 Agent 执行链路
     try:
         # 使用 with 管理连接和游标，查询结束后自动释放数据库资源
-        with connect(**config) as conn:
+        with pooled_connection() as conn:
             with conn.cursor() as cursor:
                 sql = "SHOW TABLES"
                 cursor.execute(sql)
@@ -131,12 +203,11 @@ def get_table_data(table_name) -> str:
     if invalid_reason:
         return invalid_reason
 
-    # 获取数据库参数
-    config = get_db_config()
+    # 连接由 pooled_connection 统一管理（内部读取配置并复用连接池）
 
     # 查询流程同样是：连接 -> cursor -> 执行 SQL -> 获取列信息和数据 -> 自动释放资源
     try:
-        with connect(**config) as conn:
+        with pooled_connection() as conn:
             with conn.cursor() as cursor:
                 # 表名已通过白名单校验（仅字母、数字、下划线、中文），拼接安全
                 sql = f"SELECT * FROM {table_name.strip().strip('`')} LIMIT 100"
@@ -198,13 +269,12 @@ def execute_sql_query(query) -> str:
         logger.warning("SQL 安全校验拒绝: %s", invalid_reason)
         return invalid_reason
 
-    # 获取数据库参数
-    config = get_db_config()
+    # 连接由 pooled_connection 统一管理（内部读取配置并复用连接池）
 
     # 自定义查询和 get_table_data 的结果处理逻辑一致：
     # 执行 SQL -> 读取 description 得到列名 -> fetchall 得到数据 -> 拼成 CSV 返回
     try:
-        with connect(**config) as conn:
+        with pooled_connection() as conn:
             with conn.cursor() as cursor:
                 # 已通过只读校验（SELECT/SHOW/WITH 开头、无 DDL/DML 关键字、单语句）
                 cursor.execute(query)

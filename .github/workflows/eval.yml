@@ -1,0 +1,96 @@
+name: Eval
+
+# Agent 质量回归（第三期评估体系）
+#
+# 评测需要真实 LLM 与检索服务，因此不在普通 PR 的 CI 中运行，
+# 改为手动触发 + 每周定时；结果与上一次运行对比，检出回归即失败。
+#
+# 需要的仓库 Secrets（Settings -> Secrets and variables -> Actions）：
+#   OPENAI_API_KEY / OPENAI_BASE_URL / LLM_QWEN_MAX（评测与评审用模型）
+#   TAVILY_API_KEY（网络检索用例）
+#   EMBEDDING_MODEL（知识库用例需要，且需提前构建向量库）
+
+on:
+  schedule:
+    # 每周一 UTC 02:00（北京时间 10:00）
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: "基线运行 ID（留空则自动选上一次运行）"
+        required: false
+        type: string
+
+jobs:
+  eval-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Framework smoke (mock mode，不调用外部服务)
+        run: uv run --frozen python -m app.eval run --dataset docs/eval/cases.yaml --mock --min-pass-rate 0.0
+
+      - name: Run evaluation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LLM_QWEN_MAX: ${{ secrets.LLM_QWEN_MODEL || secrets.LLM_QWEN_MAX }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+          EVAL_JUDGE_MODEL: ${{ secrets.EVAL_JUDGE_MODEL }}
+          EVAL_DB: eval_history.db
+        run: |
+          uv run --frozen python -m app.eval run \
+            --dataset docs/eval/cases.yaml \
+            --run-id "ci_${{ github.run_id }}" \
+            --min-pass-rate 0.8 \
+            --report-path eval_report.md
+
+      - name: Compare with previous run
+        id: compare
+        env:
+          EVAL_DB: eval_history.db
+        run: |
+          # 自动选择上一次运行作为基线（排除本次）
+          BASELINE="${{ inputs.baseline_run_id }}"
+          if [ -z "$BASELINE" ]; then
+            BASELINE=$(uv run --frozen python -m app.eval list --limit 5 \
+              | awk 'NR>1 && $1 != "ci_${{ github.run_id }}" {print $1; exit}')
+          fi
+          if [ -n "$BASELINE" ]; then
+            echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+            uv run --frozen python -m app.eval compare \
+              --baseline "$BASELINE" --current "ci_${{ github.run_id }}" \
+              || echo "检测到回归，详见报告" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "首次运行，无基线可对比" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            eval_report.md
+            eval_history.db
+          retention-days: 90
+
+      - name: Persist history
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: eval_history.db
+          key: eval-history-${{ github.run_id }}
+          restore-keys: |
+            eval-history-

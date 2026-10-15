@@ -1,0 +1,54 @@
+# 后端构建上下文排除清单
+#
+# 目标：缩小构建上下文、避免把本地运行产物与密钥打进镜像。
+
+# 依赖与虚拟环境（镜像内用 uv sync 重新安装）
+.venv/
+venv/
+env/
+.uv-cache/
+uv-cache/
+node_modules/
+
+# 运行时产物（数据在容器内重新生成，通过卷挂载持久化）
+app/data/
+app/output/
+app/updated/
+*.db
+*.db-wal
+*.db-shm
+
+# 向量库与模型文件
+*.faiss
+*.pkl
+
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 前端（独立镜像构建）
+frontend/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# 测试与缓存
+tests/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 文档与示例（按需保留 docs 里的知识库示例可删除注释）
+docs/
+examples/
+
+# 系统文件
+.DS_Store
+Thumbs.db
