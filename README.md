@@ -1,7 +1,7 @@
 <div align='center'>
   <h1 style="margin-top: 15px;">「深研」DeepResearch Studio</h1>
   <h4><b>deepresearch-studio · 对话式多智能体深度研究平台</b></h4>
-  <p><em>基于 DeepAgents + LangGraph 的深度研究多智能体系统：本地 FAISS 向量知识库、SQLite 会话持久化、任务生命周期管理、pytest + CI 全链路测试</em></p>
+  <p><em>基于 DeepAgents + LangGraph 的深度研究多智能体系统：一主三从编排、本地 FAISS RAG、JWT 多用户隔离、arq 分布式队列、事件持久化回放、评估回归与 Docker 全栈部署</em></p>
 </div>
 
 <div align='center'>
@@ -11,7 +11,9 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-1.1.10-2C5C2C.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688.svg?logo=fastapi&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white)
-![Tests](https://img.shields.io/badge/pytest-67%20passed-success.svg)
+![Tests](https://img.shields.io/badge/pytest-241%20passed-success.svg)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-arq%20queue-DC382D.svg?logo=redis&logoColor=white)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=githubactions&logoColor=white)
 
 [快速开始](#quick-start) • [项目亮点](#features) • [系统架构](#architecture) • [改造说明](#changelog)
@@ -134,12 +136,13 @@
 
 项目采用 DeepAgents 中典型的 Orchestrator-Workers 模式：主智能体作为调度中心，三个专家助手负责信息获取，文件工具由主智能体直接掌握。
 
-项目围绕两条主线展开：
+项目围绕三条主线展开：
 
 | 主线             | 做什么                                                       | 涉及模块                                                                  |
 | ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
 | 多智能体深度研究 | 基于用户任务完成规划、分派、检索、读取附件、汇总和生成交付物 | `DeepAgents` / `LangChain` / `LangGraph` / `Tavily` / `MySQL` / `FAISS` |
 | 前后端实时闭环   | 启动后台任务、上传文件、推送执行过程、展示结果和下载生成文件 | `FastAPI` / `WebSocket` / `React` / `Vite`                                |
+| 工程化保障       | 认证隔离、分布式执行、事件回放、评估回归、部署交付           | `JWT` / `arq` / `Redis` / `Prometheus` / `pytest` / `Docker`             |
 
 ### 智能体与工具
 
@@ -508,7 +511,7 @@ uv run python -m app.eval compare --baseline <run_a> --current <run_b>
 
 ### 4. 测试与 CI
 
-- 新增 `tests/`：159 个用例，覆盖路径解析与写入边界（含 `../` 穿越防护）、文件工具、数据库工具（mock MySQL 连接）、向量库全链路（FakeEmbeddings 确定性向量）、检查点两种模式、任务存储、认证与跨用户隔离、上传与限流、FastAPI 接口与 WebSocket、智能体组装；
+- 新增 `tests/`：首批 159 个用例，覆盖路径解析与写入边界（含 `../` 穿越防护）、文件工具、数据库工具（mock MySQL 连接池）、向量库全链路（FakeEmbeddings 确定性向量）、检查点两种模式、任务存储、认证与跨用户隔离、上传与限流、FastAPI 接口与 WebSocket、智能体组装（后续各期持续扩充，当前累计 241 个）；
 - 新增 `.github/workflows/ci.yml`：ruff lint + ruff format + pytest；
 - `pyproject.toml` 增加 `dev` 依赖组（pytest、pytest-asyncio、pytest-cov、ruff、httpx）与工具链配置。
 
