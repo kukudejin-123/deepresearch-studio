@@ -655,6 +655,17 @@ uv run python -m app.eval compare --baseline <run_a> --current <run_b>
   计数来自共享 TaskStore，memory/arq 两种队列模式下都生效；
 - `GET /api/health` 健康检查端点（不依赖 LLM/MySQL，避免探活误判）。
 
+## 📖 工程文档
+
+完整的工程文档（需求/设计/开发/测试/部署 + 面试材料）见 [docs/](docs/) 目录：
+
+- **需求与概念**：[需求分析](docs/01-需求分析.md) · [术语表](docs/02-术语与概念.md)
+- **设计文档**：[总体架构](docs/design/01-总体架构.md) · [多智能体设计](docs/design/02-多智能体设计.md) · [数据与存储](docs/design/03-数据与存储设计.md) · [安全设计](docs/design/04-安全设计.md) · [接口设计](docs/design/05-接口设计.md) · [前端设计](docs/design/06-前端设计.md)
+- **开发与机制**：[开发历程（三期演进）](docs/03-开发历程.md) · [核心机制详解](docs/04-核心机制详解.md)
+- **测试与质量**：[测试体系](docs/05-测试体系.md) · [质量评估体系](docs/06-质量评估体系.md)
+- **部署运维**：[部署与运维手册](docs/07-部署与运维.md)
+- **面试材料**：[项目介绍](docs/interview/01-项目介绍.md) · [高频问题 24 问](docs/interview/02-高频问题.md) · [技术深挖](docs/interview/03-技术深挖.md) · [踩坑复盘（13 个真实缺陷）](docs/interview/04-踩坑复盘.md)
+
 ## 📚 配套教程目录
 
 教程总入口：[深度研搜完整教程](https://didilili.github.io/ai-agents-from-zero/#/实战项目-深度研搜/0-前言)
